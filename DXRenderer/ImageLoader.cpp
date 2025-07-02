@@ -3,6 +3,8 @@
 #include "Common\DirectXHelper.h"
 #include "DirectXTex.h"
 #include "DirectXTex\DirectXTexEXR.h"
+#include <iostream>
+#include <Windows.h>
 
 using namespace DXRenderer;
 
@@ -137,7 +139,14 @@ void ImageLoader::LoadImageFromWicInt(_In_ IStream* imageStream)
     }
     else if (fmt == GUID_ContainerFormatJpeg)
     {
-        m_imageInfo.hasAppleHdrGainMap = TryLoadAppleHdrGainMapJpegMpo(imageStream, frame.Get());
+        m_imageInfo.hasAppleHdrGainMap = TryLoadCuvaHdrGainMapJpegMpo(imageStream, frame.Get());
+        if(!m_imageInfo.hasAppleHdrGainMap) {
+            m_imageInfo.hasAppleHdrGainMap = TryLoadAppleHdrGainMapJpegMpo(imageStream, frame.Get());
+        }
+        
+        if(m_imageInfo.hasAppleHdrGainMap) {
+           m_imageInfo.forceBT2100ColorSpace = true;
+        }
     }
 
     LoadImageCommon(frame.Get());
@@ -299,12 +308,6 @@ void ImageLoader::LoadImageCommon(_In_ IWICBitmapSource* source)
     m_imageInfo.pixelSize = Size(static_cast<float>(width), static_cast<float>(height));
 
     // Gainmaps generally are 1/2 pixel size of the main image, but we don't restrict this.
-    if (m_imageInfo.hasAppleHdrGainMap == true)
-    {
-        UINT mapwidth = 0, mapheight = 0;
-        IFRIMG(m_appleHdrGainMap.wicSource->GetSize(&mapwidth, &mapheight));
-        m_imageInfo.gainMapPixelSize = Size(static_cast<float>(mapwidth), static_cast<float>(mapheight));
-    }
 
     if (m_imageInfo.isHeif == true &&
         m_imageInfo.forceBT2100ColorSpace == true)
@@ -346,6 +349,13 @@ void ImageLoader::LoadImageCommon(_In_ IWICBitmapSource* source)
                                                  // is possible to further optimize this for memory usage.
         }
 
+        if (m_imageInfo.hasAppleHdrGainMap == true) {
+            UINT mapwidth = 0, mapheight = 0;
+            IFRIMG(m_appleHdrGainMap.wicSource->GetSize(&mapwidth, &mapheight));
+            m_imageInfo.gainMapPixelSize = Size(static_cast<float>(mapwidth), static_cast<float>(mapheight));
+            fmt = GUID_WICPixelFormat32bppPBGRA;
+        }
+
         ComPtr<IWICFormatConverter> format;
         IFRIMG(wicFactory->CreateFormatConverter(&format));
 
@@ -365,6 +375,10 @@ void ImageLoader::LoadImageCommon(_In_ IWICBitmapSource* source)
     CreateDeviceDependentResourcesInternal();
 
     m_imageInfo.isValid = true;
+
+    if (m_imageInfo.hasAppleHdrGainMap == true) {
+        CreateCpuMergedBitmap();
+    }
 }
 
 /// <summary>
@@ -567,6 +581,104 @@ bool ImageLoader::TryLoadAppleHdrGainMapHeic(IStream* imageStream)
 /// <param name="imageStream">Underlying stream is needed since we have to manually setup WIC to read the second Individual Image.</param>
 /// <param name="frame"></param>
 /// <returns></returns>
+bool ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapFrameDecode* frame)
+{
+    
+    auto fact = m_deviceResources->GetWicImagingFactory();
+
+    // Heuristic: Allow any Apple manufactured device.
+    ComPtr<IWICMetadataQueryReader> query;
+    CPropVariant cuvaMftr;
+
+    IFRF(frame->GetMetadataQueryReader(&query));
+    IFRF(query->GetMetadataByName(L"/app1/ifd/{ushort=271}", &cuvaMftr));
+
+    if (cuvaMftr.vt != VT_LPSTR) return false;
+    if (strcmp("HUAWEI", cuvaMftr.pszVal) != 0) return false;
+
+    LARGE_INTEGER zero = {};
+    imageStream->Seek(zero, STREAM_SEEK_SET, nullptr);
+    
+    BYTE byte;
+    ULONG bytesRead = 0;
+    int i = 0;
+    
+    while (SUCCEEDED(imageStream->Read(&byte, 1, &bytesRead)))
+    {
+        if (bytesRead == 0) break; // 到达流末尾
+        
+        jpegData.push_back(byte);
+    }
+
+    int len = jpegData.size();
+    int firstStart = -1, firstEnd = -1;
+    int secondStart = -1, secondEnd = -1;
+
+    for (int i = 4; i < len - 3; ++i)
+    {
+        if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD8 &&
+            jpegData[i + 2] == 0xFF && jpegData[i + 3] == 0xE5)
+        {
+            secondStart = i;
+            break;
+        }
+    }
+
+    if (secondStart == -1) {
+        return false;
+    }
+
+    ULARGE_INTEGER ignore = {};
+    STATSTG stats = {};
+    IFRF(imageStream->Stat(&stats, STATFLAG_NONAME));
+
+    ULARGE_INTEGER gainmapOffset_cuva;
+    gainmapOffset_cuva.QuadPart = static_cast<ULONGLONG>(secondStart);
+
+    // Separate streams are needed because we have two live decoders.
+    ULARGE_INTEGER region = {};
+    region.QuadPart = stats.cbSize.QuadPart - gainmapOffset_cuva.QuadPart;
+    ComPtr<IWICStream> gainmapStream;
+    IFRF(fact->CreateStream(&gainmapStream));
+    IFRF(gainmapStream->InitializeFromIStreamRegion(imageStream, gainmapOffset_cuva, region));
+
+    ComPtr<IWICBitmapDecoder> gainmapDecoder;
+    IFRF(fact->CreateDecoderFromStream(gainmapStream.Get(), nullptr, WICDecodeMetadataCacheOnLoad, &gainmapDecoder));
+    ComPtr<IWICBitmapFrameDecode> gainmapFrame;
+    IFRF(gainmapDecoder->GetFrame(0, &gainmapFrame));
+    ComPtr<IWICMetadataQueryReader> gainmapQuery;
+    IFRF(gainmapFrame->GetMetadataQueryReader(&gainmapQuery));
+
+    UINT width = 0, height = 0;
+    HRESULT hr = gainmapFrame->GetSize(&width, &height);
+    if (SUCCEEDED(hr))
+    {
+        wchar_t buf[100] = {};
+        // %u 用于无符号整数
+        swprintf(buf, ARRAYSIZE(buf), L"gainmapFrame Size = %u x %u\n", width, height);
+        OutputDebugString(buf);
+    }
+
+    ComPtr<IWICFormatConverter> fmt;
+    IFRF(fact->CreateFormatConverter(&fmt));
+    GUID pixelFormat = {};
+    hr = gainmapFrame->GetPixelFormat(&pixelFormat);
+
+    // 转换为带预乘alpha的32位PBGRA格式
+    hr = fmt->Initialize(
+        gainmapFrame.Get(),              // 输入帧
+        GUID_WICPixelFormat32bppPBGRA,   // 目标格式
+        WICBitmapDitherTypeNone,         // 无抖动
+        nullptr,                         // 无调色板
+        0.0f,                            // alpha阈值
+        WICBitmapPaletteTypeCustom       // 调色板类型
+    );
+
+    IFRF(fmt.As(&m_appleHdrGainMap.wicSource));
+
+    return true;
+}
+
 bool ImageLoader::TryLoadAppleHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapFrameDecode* frame)
 {
     auto fact = m_deviceResources->GetWicImagingFactory();
@@ -780,6 +892,40 @@ ID2D1TransformedImageSource* ImageLoader::GetLoadedImage(float zoom, bool select
     return output.Detach();
 }
 
+ID2D1TransformedImageSource* ImageLoader::GetMergedImage(float zoom, bool selectAppleHdrGainMap)
+{
+    EnforceStates(1, ImageLoaderState::LoadingSucceeded);
+
+    //auto context = m_deviceResources->GetD2DDeviceContext();
+
+    //ComPtr<ID2D1ImageSourceFromWic> wicImageSource_2;
+    //HRESULT hr = context->CreateImageSourceFromWic(
+    //    m_cpuMergedWICBitmapSource.Get(),  // 您的 IWICBitmapSource
+    //    &wicImageSource_2);
+    //ID2D1ImageSource* source = wicImageSource_2.Get();
+
+    ID2D1ImageSource* source = m_mergedSource.Get();
+
+    // When using ID2D1ImageSource, the recommend method of scaling is to use
+    // ID2D1TransformedImageSource. It is inexpensive to recreate this object.
+    D2D1_TRANSFORMED_IMAGE_SOURCE_PROPERTIES props =
+    {
+        D2D1_ORIENTATION_DEFAULT,
+        zoom,
+        zoom,
+        D2D1_INTERPOLATION_MODE_LINEAR, // This is ignored when using DrawImage.
+        D2D1_TRANSFORMED_IMAGE_SOURCE_OPTIONS_NONE
+    };
+
+    ComPtr<ID2D1TransformedImageSource> output;
+
+    IFT(m_deviceResources->GetD2DDeviceContext()->CreateTransformedImageSource(
+        source,
+        &props,
+        &output));
+
+    return output.Detach();
+}
 /// <summary>
 /// Gets the color context of the image.
 /// </summary>
@@ -967,6 +1113,12 @@ void ImageLoader::PopulatePixelFormatInfo(ImageInfo& info, WICPixelFormatGUID fo
         }
 
         info.isFloat = (WICPixelFormatNumericRepresentationFloat == formatNumber) ? true : false;
+
+        if (info.hasAppleHdrGainMap) {
+            info.bitsPerChannel = 10;
+            info.bitsPerPixel = 32;
+            info.isFloat = false;
+        }
     }
 }
 
@@ -1087,5 +1239,201 @@ bool ImageLoader::CheckCanDecode(_In_ IWICBitmapFrameDecode* frame)
     else
     {
         return true;
+    }
+}
+
+void ImageLoader::CreateCpuMergedBitmap()
+{
+    OutputDebugString(L"CreateCpuMergedBitmap: Start\n");
+    ComPtr<IWICImagingFactory> wicFactory;
+    CoCreateInstance(
+        CLSID_WICImagingFactory2,
+        nullptr,
+        CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&wicFactory)
+    );
+
+    //ComPtr<ID2D1TransformedImageSource> mainTrans;
+    //ComPtr<ID2D1TransformedImageSource> gainTrans;
+    //mainTrans = m_imageSource;
+    //gainTrans = m_appleHdrGainMap.wicSource;
+
+    auto context = m_deviceResources->GetD2DDeviceContext();
+
+    // 3) 再从 ImageSourceFromWic 拿到真正的 IWICBitmapSource
+    ComPtr<IWICBitmapSource> mainSrc;
+    ComPtr<IWICBitmapSource> gainSrc;
+    mainSrc= m_wicCachedSource;
+    gainSrc = m_appleHdrGainMap.wicSource;
+
+    UINT width = 0, height = 0;
+    mainSrc->GetSize(&width, &height);
+
+    const UINT bytesPerPixel_main = 4;
+    const UINT bytesPerPixel_gain = 4;
+    UINT strideMain = width * bytesPerPixel_main;
+    UINT strideGain = width * bytesPerPixel_gain;
+    UINT bufferSizeMain = strideMain * height;
+    UINT bufferSizeGain = strideGain * height;
+    std::vector<BYTE> bufferMain(bufferSizeMain);
+    std::vector<BYTE> bufferGain(bufferSizeGain);
+    WICRect rect = { 0, 0, static_cast<INT>(width), static_cast<INT>(height) };
+
+    IFT(mainSrc->CopyPixels(
+        &rect,
+        strideMain,
+        bufferSizeMain,
+        bufferMain.data()));
+
+    ComPtr<IWICBitmapScaler> scaler;
+    IFT(wicFactory->CreateBitmapScaler(&scaler));
+    IFT(scaler->Initialize(gainSrc.Get(), width, height, WICBitmapInterpolationModeLinear));
+    IFT(scaler->CopyPixels(&rect, strideGain, bufferSizeGain, bufferGain.data()));
+
+    ComPtr<IWICBitmap> outBitmap;
+    IFT(wicFactory->CreateBitmap(
+        width, height,
+        //GUID_WICPixelFormat64bppRGBAHalf, // 改为 RGBA1010102 格式
+        GUID_WICPixelFormat64bppPRGBAHalf,
+        WICBitmapCacheOnLoad,
+        &outBitmap));
+
+    //// 2) 锁定 FP16 位图进行写入
+    ComPtr<IWICBitmapLock> lockOut;
+    IFT(outBitmap->Lock(&rect, WICBitmapLockWrite, &lockOut));
+
+    UINT strideOut = 0;
+    BYTE* dataOut = nullptr;
+    UINT bufferSizeOut = 0;
+    IFT(lockOut->GetStride(&strideOut));
+    IFT(lockOut->GetDataPointer(&bufferSizeOut, &dataOut));
+
+    const UINT bytesPerPixel = 8;
+    const UINT safePixelsPerRow = strideOut / bytesPerPixel;
+    const UINT pixelsToWrite = min(width, safePixelsPerRow);
+
+    if (dataOut == nullptr)
+    {
+        OutputDebugString(L"Error: GetDataPointer returned NULL data pointer\n");
+        return;
+    }
+
+    //// 逐像素计算写回 outBitmap
+    const float eps = 1.0f / 64.0f;
+
+    OutputDebugString(L"Processing pixels...\n");
+    for (UINT y = 0; y < height; y++)
+    {
+        if (y * strideOut >= bufferSizeOut)
+        {
+            wchar_t errorMsg[256];
+            swprintf_s(errorMsg, L"Row %d exceeds buffer size! BufferSize=%u, Offset=%u\n",
+                y, bufferSizeOut, y * strideOut);
+            OutputDebugString(errorMsg);
+            break; // 跳出循环避免崩溃
+        }
+
+        BYTE* mainRow = bufferMain.data() + y * strideMain;
+        BYTE* gainRow = bufferGain.data() + y * strideGain;
+        BYTE* rowStart = dataOut + y * strideOut;
+
+        for (UINT x = 0; x < width; x++)
+        {
+            // 读取主图像素（PBGRA8）
+            float R_main = mainRow[4 * x + 2] / 255.0f;
+            float G_main = mainRow[4 * x + 1] / 255.0f;
+            float B_main = mainRow[4 * x + 0] / 255.0f;
+
+            R_main = sRGBToLinear(R_main);
+            G_main = sRGBToLinear(G_main);
+            B_main = sRGBToLinear(B_main);
+
+            // 读取增益图像素（PBGRA8）
+            float gainB = gainRow[4 * x + 0] / 128.0f; // [0.0, 2.0]
+            float gainG = gainRow[4 * x + 1] / 128.0f;
+            float gainR = gainRow[4 * x + 2] / 128.0f;
+
+            //   gainB = sRGBToLinear(gainB);
+            //   gainG = sRGBToLinear(gainG);
+            //   gainR = sRGBToLinear(gainR);
+
+               //应用增益公式
+            R_main = powf(2.0f, gainR) * (R_main + eps) - eps;
+            G_main = powf(2.0f, gainG) * (G_main + eps) - eps;
+            B_main = powf(2.0f, gainB) * (B_main + eps) - eps;
+
+
+            BYTE* targetPixel = rowStart + x * bytesPerPixel;
+            if (targetPixel + bytesPerPixel > dataOut + bufferSizeOut)
+            {
+                continue; // 跳过超出缓冲区的像素
+            }
+
+            uint16_t* pixelData = reinterpret_cast<uint16_t*>(targetPixel);
+            pixelData[0] = FloatToHalf(R_main); // R
+            pixelData[1] = FloatToHalf(G_main); // G
+            pixelData[2] = FloatToHalf(B_main); // B
+            pixelData[3] = FloatToHalf(1.0f);   // A (不透明)
+
+        }
+    }
+    lockOut.Reset();
+    m_cpuMergedWICBitmapSource = outBitmap;
+
+    ComPtr<ID2D1ImageSourceFromWic> ID2D1ImageSource_merged;
+
+    //IFRIMG(context->CreateImageSourceFromWic(m_cpuMergedWICBitmapSource.Get(), &ID2D1ImageSource_merged));
+
+    HRESULT hr = context->CreateImageSourceFromWic(m_cpuMergedWICBitmapSource.Get(), &ID2D1ImageSource_merged);
+    if (FAILED(hr)) {
+        wchar_t msg[256];
+        swprintf_s(msg, L"CreateImageSourceFromWic failed with HRESULT: 0x%08X\n", hr);
+        OutputDebugString(msg);
+    }
+
+    IFRIMG(ID2D1ImageSource_merged.As(&m_mergedSource));
+
+}
+
+uint16_t ImageLoader::FloatToHalf(float value)
+{
+    // 简单实现 - 实际项目中应使用优化版本
+    uint32_t f = *reinterpret_cast<uint32_t*>(&value);
+    uint32_t sign = (f >> 16) & 0x8000;
+    int32_t exp = (f >> 23) & 0xff;
+    uint32_t mant = f & 0x7fffff;
+
+    if (exp == 0xff) { // NaN/Inf
+        return sign | 0x7c00 | (mant ? 0x200 | (mant >> 13) : 0);
+    }
+
+    exp -= 127;
+    if (exp > 15) {
+        return sign | 0x7c00; // 溢出->Inf
+    }
+    if (exp < -14) {
+        return sign; // 下溢->0
+    }
+
+    uint32_t uexp = static_cast<uint32_t>(exp + 15);
+    uint32_t hmant = mant >> 13;
+    if ((mant & 0x1000) != 0) { // 四舍五入
+        hmant += 1;
+        if (hmant & 0x0400) {
+            hmant = 0;
+            uexp += 1;
+        }
+    }
+
+    return static_cast<uint16_t>(sign | (uexp << 10) | hmant);
+}
+
+float ImageLoader::sRGBToLinear(float color)
+{
+    if (color <= 0.04045f) {
+        return color / 12.92f;
+    }
+    else {
+        return std::pow((color + 0.055f) / 1.055f, 2.4f);
     }
 }

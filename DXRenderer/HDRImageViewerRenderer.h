@@ -16,6 +16,8 @@
 #include "RenderOptions.h"
 #include "ImageLoader.h"
 #include "Matrix.h"
+#include <DirectXMath.h> // 用于 XMConvertFloatToHalf
+#include <d2d1_1.h>
 
 namespace DXRenderer
 {
@@ -100,6 +102,7 @@ namespace DXRenderer
         // WIC and Direct2D resources.
         Microsoft::WRL::ComPtr<ID2D1TransformedImageSource>     m_loadedImage;
         Microsoft::WRL::ComPtr<ID2D1TransformedImageSource>     m_loadedGainMap;
+        Microsoft::WRL::ComPtr<ID2D1TransformedImageSource>     m_loadedMergedImage;
         Microsoft::WRL::ComPtr<ID2D1Effect>                     m_gainmapLinearEffect;
         Microsoft::WRL::ComPtr<ID2D1Effect>                     m_gainmapRefWhiteEffect;
         Microsoft::WRL::ComPtr<ID2D1Effect>                     m_gainMapMergeEffect;

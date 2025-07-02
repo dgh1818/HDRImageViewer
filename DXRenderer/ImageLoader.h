@@ -96,6 +96,7 @@ namespace DXRenderer
         ImageInfo LoadImageFromDirectXTex(_In_ Platform::String^ filename, _In_ Platform::String^ extension);
 
         ID2D1TransformedImageSource* GetLoadedImage(float zoom, bool selectAppleHdrGainMap);
+        ID2D1TransformedImageSource* GetMergedImage(float zoom, bool selectAppleHdrGainMap);
 
         ID2D1ColorContext* GetImageColorContext();
         ImageInfo GetImageInfo();
@@ -103,6 +104,7 @@ namespace DXRenderer
 
         void CreateDeviceDependentResources();
         void ReleaseDeviceDependentResources();
+        Microsoft::WRL::ComPtr<IWICBitmapSource>                m_cpuMergedWICBitmapSource;
 
     private:
         /// <summary>
@@ -163,12 +165,23 @@ namespace DXRenderer
         bool TryLoadAppleHdrGainMapHeic(_In_ IStream* imageStream);
         bool TryLoadAppleHdrGainMapJpegMpo(_In_ IStream* imageStream, _In_ IWICBitmapFrameDecode* frame);
 
+        bool TryLoadCuvaHdrGainMapJpegMpo(_In_ IStream* imageStream, _In_ IWICBitmapFrameDecode* frame);
+        void CreateCpuMergedBitmap();
+        uint16_t FloatToHalf(float value);
+        float sRGBToLinear(float color);
+
         std::shared_ptr<DeviceResources>                        m_deviceResources;
 
         // Device-independent
         Microsoft::WRL::ComPtr<IWICBitmapSource>                m_wicCachedSource;
         Microsoft::WRL::ComPtr<IWICColorContext>                m_wicColorContext;
         CHeifImageWithWicSource                                 m_appleHdrGainMap;
+        Microsoft::WRL::ComPtr<IWICStream> InputStream;
+        std::vector<BYTE> jpegData;
+        ULONG bytesRead;
+        std::vector<unsigned char> gainmapBytes;
+        float                                                   m_zoom;
+        //Microsoft::WRL::ComPtr<IWICBitmapSource>                m_cpuMergedWICBitmapSource;
 
         ImageLoaderState                                        m_state;
         ImageInfo                                               m_imageInfo;
@@ -178,6 +191,7 @@ namespace DXRenderer
         // Device-dependent. Everything here needs to be reset in ReleaseDeviceDependentResources.
         Microsoft::WRL::ComPtr<ID2D1ImageSource>                m_imageSource;
         Microsoft::WRL::ComPtr<ID2D1ImageSource>                m_hdrGainMapSource;
+        Microsoft::WRL::ComPtr<ID2D1ImageSource>                m_mergedSource;
         Microsoft::WRL::ComPtr<ID2D1ColorContext>               m_colorContext;
 
         // 128 byte ICC profile header for Xbox console HDR screen captures.

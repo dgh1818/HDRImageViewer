@@ -6,6 +6,8 @@
 #include "MagicConstants.h"
 #include "RenderEffects\SimpleTonemapEffect.h"
 #include "DirectXTex\DirectXTexEXR.h"
+#include <iostream>
+#include <Windows.h>
 
 using namespace DXRenderer;
 
@@ -431,13 +433,39 @@ void HDRImageViewerRenderer::CreateImageDependentResources()
         IFT(m_gainmapRefWhiteEffect->SetValue(D2D1_WHITELEVELADJUSTMENT_PROP_INPUT_WHITE_LEVEL, sdrWhite));
         IFT(m_gainmapRefWhiteEffect->SetValue(D2D1_WHITELEVELADJUSTMENT_PROP_OUTPUT_WHITE_LEVEL, D2D1_SCENE_REFERRED_SDR_WHITE_LEVEL));
 
-        IFT(context->CreateEffect(CLSID_D2D1ArithmeticComposite, &m_gainMapMergeEffect));
+        // IFT(context->CreateEffect(CLSID_D2D1ArithmeticComposite, &m_gainMapMergeEffect));
 
-        m_gainMapMergeEffect->SetInputEffect(0, m_colorManagementEffect.Get());
-        m_gainMapMergeEffect->SetInputEffect(1, m_gainmapRefWhiteEffect.Get());
+        // m_gainMapMergeEffect->SetInputEffect(0, m_colorManagementEffect.Get());
+        // m_gainMapMergeEffect->SetInputEffect(1, m_gainmapRefWhiteEffect.Get());
 
-        // Coefficients A, B, C, D: Output = A*source*dest + B*source + C*dest + D.
-        m_gainMapMergeEffect->SetValue(D2D1_ARITHMETICCOMPOSITE_PROP_COEFFICIENTS, D2D1::Vector4F(2.f, 0.0f, 0.0f, 0.0f));
+        // // Coefficients A, B, C, D: Output = A*source*dest + B*source + C*dest + D.
+        // m_gainMapMergeEffect->SetValue(D2D1_ARITHMETICCOMPOSITE_PROP_COEFFICIENTS, D2D1::Vector4F(2.f, 0.0f, 0.0f, 0.0f));
+
+         IFT(context->CreateEffect(CLSID_D2D1Composite, &m_gainMapMergeEffect));
+         m_loadedMergedImage = m_imageLoader->GetMergedImage(m_zoom, false);
+
+         ComPtr<ID2D1Effect> identityPassthrough;
+         IFT(context->CreateEffect(CLSID_D2D1ColorMatrix, &identityPassthrough));
+
+         // 设置成 Identity Matrix（4x4 + offset）
+         D2D1_MATRIX_5X4_F id =
+         {
+             1, 0, 0, 0,   // R'
+             0, 1, 0, 0,   // G'
+             0, 0, 1, 0,   // B'
+             0, 0, 0, 1,   // A'
+             0, 0, 0, 0    // offset
+         };
+         identityPassthrough->SetValue(
+             D2D1_COLORMATRIX_PROP_COLOR_MATRIX,
+             id
+         );
+
+         // 把你的合并图当作这个 Effect 的输入
+         identityPassthrough->SetInput(0, m_loadedMergedImage.Get());
+
+         // 最后把 identityPassthrough 赋给 m_gainMapMergeEffect
+         m_gainMapMergeEffect = identityPassthrough;
     }
     else
     {
@@ -876,7 +904,9 @@ void HDRImageViewerRenderer::UpdateImageTransformState()
         if (m_imageInfo.hasAppleHdrGainMap == true)
         {
             m_loadedGainMap = m_imageLoader->GetLoadedImage(m_zoom, true);
-            m_gainmapLinearEffect->SetInput(0, m_loadedGainMap.Get());
+            //m_gainmapLinearEffect->SetInput(0, m_loadedGainMap.Get());
+            m_loadedMergedImage = m_imageLoader->GetMergedImage(m_zoom, false);
+            m_gainMapMergeEffect->SetInput(0, m_loadedMergedImage.Get());
         }
     }
 }
