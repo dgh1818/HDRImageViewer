@@ -24,6 +24,14 @@
 <br />
 
 ## About the Project
+支持华为老的私有HDR标准的照片查看（任何设备包括并早于麒麟9000s的设备使用老的私有HDR照片格式，包括运行于Harmonyos Next设备上的9000s设备）
+This software support HUAWEI HarmonyOS the old CUVA standard HDR photo
+
+Any device before(include) kirin9000s use the old CUVA standard HDR photo.(Which is not compatible with ISO standard)
+
+
+Oringinal:
+## About the Project
 This is a Universal Windows Platform (UWP) app that uses [DirectX Advanced Color](https://aka.ms/directxhdr) to decode and render HDR image formats at the best available quality on a supported HDR10 display.
 
 Supported formats include:
