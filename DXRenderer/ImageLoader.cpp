@@ -585,6 +585,8 @@ bool ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapF
 {
     
     auto fact = m_deviceResources->GetWicImagingFactory();
+    STATSTG stats = {};
+    IFRF(imageStream->Stat(&stats, STATFLAG_NONAME));
 
     // Heuristic: Allow any Apple manufactured device.
     ComPtr<IWICMetadataQueryReader> query;
@@ -602,15 +604,12 @@ bool ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapF
     BYTE byte;
     ULONG bytesRead = 0;
     int i = 0;
-    
-    while (SUCCEEDED(imageStream->Read(&byte, 1, &bytesRead)))
-    {
-        if (bytesRead == 0) break; // 到达流末尾
-        
-        jpegData.push_back(byte);
-    }
 
-    int len = jpegData.size();
+    jpegData.resize(stats.cbSize.QuadPart);
+    ULONG read = 0;
+    imageStream->Read(jpegData.data(), stats.cbSize.QuadPart, &read);
+
+    int len = stats.cbSize.QuadPart;
     int firstStart = -1, firstEnd = -1;
     int secondStart = -1, secondEnd = -1;
 
@@ -629,8 +628,6 @@ bool ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapF
     }
 
     ULARGE_INTEGER ignore = {};
-    STATSTG stats = {};
-    IFRF(imageStream->Stat(&stats, STATFLAG_NONAME));
 
     ULARGE_INTEGER gainmapOffset_cuva;
     gainmapOffset_cuva.QuadPart = static_cast<ULONGLONG>(secondStart);
@@ -1245,7 +1242,7 @@ bool ImageLoader::CheckCanDecode(_In_ IWICBitmapFrameDecode* frame)
 void ImageLoader::CreateCpuMergedBitmap()
 {
     OutputDebugString(L"CreateCpuMergedBitmap: Start\n");
-    ComPtr<IWICImagingFactory> wicFactory;
+    ComPtr<IWICImagingFactory2> wicFactory;
     CoCreateInstance(
         CLSID_WICImagingFactory2,
         nullptr,
@@ -1322,28 +1319,78 @@ void ImageLoader::CreateCpuMergedBitmap()
     const float eps = 1.0f / 64.0f;
 
     OutputDebugString(L"Processing pixels...\n");
-    for (UINT y = 0; y < height; y++)
-    {
-        if (y * strideOut >= bufferSizeOut)
-        {
-            wchar_t errorMsg[256];
-            swprintf_s(errorMsg, L"Row %d exceeds buffer size! BufferSize=%u, Offset=%u\n",
-                y, bufferSizeOut, y * strideOut);
-            OutputDebugString(errorMsg);
-            break; // 跳出循环避免崩溃
-        }
+    //for (UINT y = 0; y < height; y++)
+    //{
+    //    if (y * strideOut >= bufferSizeOut)
+    //    {
+    //        wchar_t errorMsg[256];
+    //        swprintf_s(errorMsg, L"Row %d exceeds buffer size! BufferSize=%u, Offset=%u\n",
+    //            y, bufferSizeOut, y * strideOut);
+    //        OutputDebugString(errorMsg);
+    //        break; // 跳出循环避免崩溃
+    //    }
 
+    //    BYTE* mainRow = bufferMain.data() + y * strideMain;
+    //    BYTE* gainRow = bufferGain.data() + y * strideGain;
+    //    BYTE* rowStart = dataOut + y * strideOut;
+
+    //    for (UINT x = 0; x < width; x++)
+    //    {
+    //        // 读取主图像素（PBGRA8）
+    //        float R_main = mainRow[4 * x + 2] / 255.0f;
+    //        float G_main = mainRow[4 * x + 1] / 255.0f;
+    //        float B_main = mainRow[4 * x + 0] / 255.0f;
+
+    //        R_main = sRGBToLinear(R_main);
+    //        G_main = sRGBToLinear(G_main);
+    //        B_main = sRGBToLinear(B_main);
+
+    //        // 读取增益图像素（PBGRA8）
+    //        float gainB = gainRow[4 * x + 0] / 128.0f; // [0.0, 2.0]
+    //        float gainG = gainRow[4 * x + 1] / 128.0f;
+    //        float gainR = gainRow[4 * x + 2] / 128.0f;
+
+    //        //   gainB = sRGBToLinear(gainB);
+    //        //   gainG = sRGBToLinear(gainG);
+    //        //   gainR = sRGBToLinear(gainR);
+
+    //           //应用增益公式
+    //        R_main = powf(2.0f, gainR) * (R_main + eps) - eps;
+    //        G_main = powf(2.0f, gainG) * (G_main + eps) - eps;
+    //        B_main = powf(2.0f, gainB) * (B_main + eps) - eps;
+
+
+    //        BYTE* targetPixel = rowStart + x * bytesPerPixel;
+    //        if (targetPixel + bytesPerPixel > dataOut + bufferSizeOut)
+    //        {
+    //            continue; // 跳过超出缓冲区的像素
+    //        }
+
+    //        uint16_t* pixelData = reinterpret_cast<uint16_t*>(targetPixel);
+    //        pixelData[0] = FloatToHalf(R_main); // R
+    //        pixelData[1] = FloatToHalf(G_main); // G
+    //        pixelData[2] = FloatToHalf(B_main); // B
+    //        pixelData[3] = FloatToHalf(1.0f);   // A (不透明)
+
+    //    }
+    //}
+
+    // 设置OpenMP并行
+    #pragma omp parallel for
+    for (int y = 0; y < static_cast<int>(height); y++)
+    {
         BYTE* mainRow = bufferMain.data() + y * strideMain;
         BYTE* gainRow = bufferGain.data() + y * strideGain;
         BYTE* rowStart = dataOut + y * strideOut;
 
         for (UINT x = 0; x < width; x++)
         {
-            // 读取主图像素（PBGRA8）
+            // 读取主图像素（PBGRA8）并转换到线性空间
             float R_main = mainRow[4 * x + 2] / 255.0f;
             float G_main = mainRow[4 * x + 1] / 255.0f;
             float B_main = mainRow[4 * x + 0] / 255.0f;
 
+            // 使用sRGBToLinear函数转换
             R_main = sRGBToLinear(R_main);
             G_main = sRGBToLinear(G_main);
             B_main = sRGBToLinear(B_main);
@@ -1353,28 +1400,20 @@ void ImageLoader::CreateCpuMergedBitmap()
             float gainG = gainRow[4 * x + 1] / 128.0f;
             float gainR = gainRow[4 * x + 2] / 128.0f;
 
-            //   gainB = sRGBToLinear(gainB);
-            //   gainG = sRGBToLinear(gainG);
-            //   gainR = sRGBToLinear(gainR);
-
-               //应用增益公式
+            // 应用增益公式
             R_main = powf(2.0f, gainR) * (R_main + eps) - eps;
             G_main = powf(2.0f, gainG) * (G_main + eps) - eps;
             B_main = powf(2.0f, gainB) * (B_main + eps) - eps;
 
-
+            // 写入目标像素（RGBA half）
             BYTE* targetPixel = rowStart + x * bytesPerPixel;
-            if (targetPixel + bytesPerPixel > dataOut + bufferSizeOut)
-            {
-                continue; // 跳过超出缓冲区的像素
-            }
-
             uint16_t* pixelData = reinterpret_cast<uint16_t*>(targetPixel);
+
+            // 转换为半精度
             pixelData[0] = FloatToHalf(R_main); // R
             pixelData[1] = FloatToHalf(G_main); // G
             pixelData[2] = FloatToHalf(B_main); // B
-            pixelData[3] = FloatToHalf(1.0f);   // A (不透明)
-
+            pixelData[3] = 0x3C00;              // A = 1.0 (半精度)
         }
     }
     lockOut.Reset();

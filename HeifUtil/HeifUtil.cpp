@@ -33,7 +33,7 @@ int main(int argc, WCHAR* argv[])
         }
     }
 
-    CComPtr<IWICImagingFactory> fact;
+    CComPtr<IWICImagingFactory2> fact;
     hr = CoCreateInstance(
         CLSID_WICImagingFactory2,
         nullptr,

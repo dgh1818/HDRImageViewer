@@ -54,7 +54,7 @@ void ImageExporter::GetDebugOutputStream(_Out_ IStream** fileStream)
 
     file.Close();
 
-    ComPtr<IWICImagingFactory> wicFactory;
+    ComPtr<IWICImagingFactory2> wicFactory;
     IFT(CoCreateInstance(
         CLSID_WICImagingFactory2,
         nullptr,
@@ -168,7 +168,7 @@ void ImageExporter::ExportToDds(IWICBitmap* bitmap, IStream* stream, DXGI_FORMAT
 /// <param name="countBytes"></param>
 /// <param name="fmt"></param>
 /// <param name="stream"></param>
-void ImageExporter::ExportPixels(IWICImagingFactory* fact, unsigned int pixelWidth, unsigned int pixelHeight, byte* buffer, unsigned int stride, unsigned int countBytes, WICPixelFormatGUID fmt, IStream* stream)
+void ImageExporter::ExportPixels(IWICImagingFactory2* fact, unsigned int pixelWidth, unsigned int pixelHeight, byte* buffer, unsigned int stride, unsigned int countBytes, WICPixelFormatGUID fmt, IStream* stream)
 {
     ComPtr<IWICBitmap> bitmap;
     IFT(fact->CreateBitmapFromMemory(pixelWidth, pixelHeight, fmt, stride, countBytes, buffer, &bitmap));
