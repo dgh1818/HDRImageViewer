@@ -304,13 +304,22 @@ namespace HDRImageViewerCS
 
                 var dispcll = enableExperimentalTools ? (float)DispMaxCLLOverrideSlider.Value : 0.0f;
 
-                renderer.SetRenderOptions(
-                    tm.Kind,
-                    (float)SdrExposureFormatter.SliderToExposure(ExposureAdjustSlider.Value),
-                    dispcll, // Display MaxCLL override
-                    dispInfo,
-                    enableGamutMap
-                    );
+                if(dispInfo.CurrentAdvancedColorKind == AdvancedColorKind.HighDynamicRange)
+                {
+                    dispcll = 1000;
+                } else
+                {
+                    dispcll = dispInfo.MaxLuminanceInNits;
+                }
+
+
+                    renderer.SetRenderOptions(
+                        tm.Kind,
+                        (float)SdrExposureFormatter.SliderToExposure(ExposureAdjustSlider.Value),
+                        dispcll, // Display MaxCLL override
+                        dispInfo,
+                        enableGamutMap
+                        );
             }
         }
 

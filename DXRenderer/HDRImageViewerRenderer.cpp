@@ -117,7 +117,13 @@ void HDRImageViewerRenderer::SetRenderOptions(
     m_dispMaxCLLOverride = dispMaxCllOverride;
     m_constrainGamut = constrainGamut;
 
-    float lum = m_dispInfo->MaxLuminanceInNits;
+    float lum;
+    if (acInfo == nullptr) {
+        lum = 1000;
+    }
+    else {
+        lum = dispMaxCllOverride;
+    }
 
     struct _colors
     {
