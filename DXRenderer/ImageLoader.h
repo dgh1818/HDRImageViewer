@@ -19,6 +19,8 @@
 #include "Common\DeviceResources.h"
 #include "ImageInfo.h"
 #include "LibHeifHelpers.h"
+#include <omp.h>
+#include <immintrin.h>
 
 #include <cstdarg>
 
@@ -207,5 +209,8 @@ namespace DXRenderer
 
         // Offset of the 4 byte uint32 representing the EOI of the primary image.
         const unsigned int                                      m_appleApp2MPBlockMagicOffset;
+
+        void initLUT();
+        float lut_sRGBToLinear(float c);
     };
 }

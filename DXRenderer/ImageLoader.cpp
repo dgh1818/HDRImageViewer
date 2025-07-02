@@ -16,6 +16,8 @@ using namespace Windows::Foundation;
 using namespace Windows::Graphics::Display;
 
 static const unsigned int sc_MaxBytesPerPixel = 16; // Covers all supported image formats (128bpp).
+static bool lutInitialized = false;
+static float sRGBToLinearLUT[256];
 
 ImageLoader::ImageLoader(const std::shared_ptr<DeviceResources>& deviceResources, ImageLoaderOptions& options) :
     m_deviceResources(deviceResources),
@@ -1284,7 +1286,8 @@ void ImageLoader::CreateCpuMergedBitmap()
 
     ComPtr<IWICBitmapScaler> scaler;
     IFT(wicFactory->CreateBitmapScaler(&scaler));
-    IFT(scaler->Initialize(gainSrc.Get(), width, height, WICBitmapInterpolationModeLinear));
+    //IFT(scaler->Initialize(gainSrc.Get(), width, height, WICBitmapInterpolationModeLinear));     //牺牲效果优化速度
+    IFT(scaler->Initialize(gainSrc.Get(), width, height, WICBitmapInterpolationModeNearestNeighbor));
     IFT(scaler->CopyPixels(&rect, strideGain, bufferSizeGain, bufferGain.data()));
 
     ComPtr<IWICBitmap> outBitmap;
@@ -1375,6 +1378,8 @@ void ImageLoader::CreateCpuMergedBitmap()
     //    }
     //}
 
+    initLUT();
+    
     // 设置OpenMP并行
     #pragma omp parallel for
     for (int y = 0; y < static_cast<int>(height); y++)
@@ -1391,9 +1396,13 @@ void ImageLoader::CreateCpuMergedBitmap()
             float B_main = mainRow[4 * x + 0] / 255.0f;
 
             // 使用sRGBToLinear函数转换
-            R_main = sRGBToLinear(R_main);
-            G_main = sRGBToLinear(G_main);
-            B_main = sRGBToLinear(B_main);
+            // R_main = sRGBToLinear(R_main);
+            // G_main = sRGBToLinear(G_main);
+            // B_main = sRGBToLinear(B_main);
+
+            R_main = lut_sRGBToLinear(R_main);
+            G_main = lut_sRGBToLinear(G_main);
+            B_main = lut_sRGBToLinear(B_main);
 
             // 读取增益图像素（PBGRA8）
             float gainB = gainRow[4 * x + 0] / 128.0f; // [0.0, 2.0]
@@ -1437,34 +1446,38 @@ void ImageLoader::CreateCpuMergedBitmap()
 uint16_t ImageLoader::FloatToHalf(float value)
 {
     // 简单实现 - 实际项目中应使用优化版本
-    uint32_t f = *reinterpret_cast<uint32_t*>(&value);
-    uint32_t sign = (f >> 16) & 0x8000;
-    int32_t exp = (f >> 23) & 0xff;
-    uint32_t mant = f & 0x7fffff;
+    // uint32_t f = *reinterpret_cast<uint32_t*>(&value);
+    // uint32_t sign = (f >> 16) & 0x8000;
+    // int32_t exp = (f >> 23) & 0xff;
+    // uint32_t mant = f & 0x7fffff;
 
-    if (exp == 0xff) { // NaN/Inf
-        return sign | 0x7c00 | (mant ? 0x200 | (mant >> 13) : 0);
-    }
+    // if (exp == 0xff) { // NaN/Inf
+    //     return sign | 0x7c00 | (mant ? 0x200 | (mant >> 13) : 0);
+    // }
 
-    exp -= 127;
-    if (exp > 15) {
-        return sign | 0x7c00; // 溢出->Inf
-    }
-    if (exp < -14) {
-        return sign; // 下溢->0
-    }
+    // exp -= 127;
+    // if (exp > 15) {
+    //     return sign | 0x7c00; // 溢出->Inf
+    // }
+    // if (exp < -14) {
+    //     return sign; // 下溢->0
+    // }
 
-    uint32_t uexp = static_cast<uint32_t>(exp + 15);
-    uint32_t hmant = mant >> 13;
-    if ((mant & 0x1000) != 0) { // 四舍五入
-        hmant += 1;
-        if (hmant & 0x0400) {
-            hmant = 0;
-            uexp += 1;
-        }
-    }
+    // uint32_t uexp = static_cast<uint32_t>(exp + 15);
+    // uint32_t hmant = mant >> 13;
+    // if ((mant & 0x1000) != 0) { // 四舍五入
+    //     hmant += 1;
+    //     if (hmant & 0x0400) {
+    //         hmant = 0;
+    //         uexp += 1;
+    //     }
+    // }
 
-    return static_cast<uint16_t>(sign | (uexp << 10) | hmant);
+    // return static_cast<uint16_t>(sign | (uexp << 10) | hmant);
+
+    __m128 vec = _mm_set_ss(value);
+    __m128i half = _mm_cvtps_ph(vec, _MM_FROUND_TO_NEAREST_INT);
+    return static_cast<uint16_t>(_mm_extract_epi16(half, 0));
 }
 
 float ImageLoader::sRGBToLinear(float color)
@@ -1475,4 +1488,22 @@ float ImageLoader::sRGBToLinear(float color)
     else {
         return std::pow((color + 0.055f) / 1.055f, 2.4f);
     }
+}
+
+void ImageLoader::initLUT() {
+    if (!lutInitialized) {
+        for (int i = 0; i < 256; i++) {
+            float c = i / 255.0f;
+            sRGBToLinearLUT[i] = (c <= 0.04045f) ? 
+                c / 12.92f : 
+                powf((c + 0.055f) / 1.055f, 2.4f);
+        }
+        lutInitialized = true;
+    }
+}
+
+float ImageLoader::lut_sRGBToLinear(float c) {
+    int index = static_cast<int>(c * 255.0f + 0.5f);
+    index = max(0, min(255, index));
+    return sRGBToLinearLUT[index];
 }
