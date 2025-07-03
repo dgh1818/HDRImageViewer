@@ -1,8 +1,12 @@
 ﻿using DXRenderer;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using Windows.Foundation.Collections;
+using Windows.Foundation.Metadata;
 using Windows.Graphics.Display;
 using Windows.Storage;
 using Windows.Storage.AccessCache;
@@ -459,6 +463,147 @@ namespace HDRImageViewerCS
             }
         }
 
+        private StorageFolder _currentFolder = null;
+        private List<StorageFile> _fileList = new List<StorageFile>();
+        private int _currentIndex = -1;
+        private bool _isLoadingFileList = false;
+        private bool _isLoadingImage = false;
+
+        private void UpdateNavigationButtonsState()
+        {
+            // 确保在主线程更新UI
+            if (!Dispatcher.HasThreadAccess)
+            {
+                Dispatcher.RunAsync(CoreDispatcherPriority.Normal, UpdateNavigationButtonsState);
+                return;
+            }
+
+            try
+            {
+                // 根据加载状态决定按钮是否可用
+                bool canNavigate = !_isLoadingFileList && !_isLoadingImage;
+
+                // 检查是否有文件列表且不在加载中
+                bool hasFiles = _fileList.Count > 1; // 至少需要2个文件才能导航
+
+                // 检查索引合法性
+                bool canGoPrev = canNavigate && hasFiles && _currentIndex > 0;
+                bool canGoNext = canNavigate && hasFiles && _currentIndex < _fileList.Count - 1;
+
+                // 更新按钮状态
+                PrevImageButton.IsEnabled = canGoPrev;
+                NextImageButton.IsEnabled = canGoNext;
+
+                Debug.WriteLine($"更新导航按钮状态: 文件加载中={_isLoadingFileList}, 图片加载中={_isLoadingImage}, Prev={canGoPrev}, Next={canGoNext}");
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"更新导航按钮状态失败: {ex.Message}");
+                // 安全处理：禁用所有导航按钮
+                PrevImageButton.IsEnabled = false;
+                NextImageButton.IsEnabled = false;
+            }
+        }
+
+        private async void PrevImageButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_fileList.Count == 0 || _currentIndex <= 0)
+            {
+                Debug.WriteLine("无法向前导航：已在第一张图片");
+                return;
+            }
+
+            int newIndex = _currentIndex - 1;
+            Debug.WriteLine($"向前导航: {_currentIndex} -> {newIndex}");
+
+            // 直接从文件列表中获取 StorageFile 对象
+            StorageFile file = _fileList[newIndex];
+            await LoadImageAsync(file);
+        }
+
+        private async void NextImageButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_fileList.Count == 0 || _currentIndex >= _fileList.Count - 1)
+            {
+                Debug.WriteLine("无法向后导航：已在最后一张图片");
+                return;
+            }
+
+            int newIndex = _currentIndex + 1;
+            Debug.WriteLine($"向后导航: {_currentIndex} -> {newIndex}");
+
+            // 直接从文件列表中获取 StorageFile 对象
+            StorageFile file = _fileList[newIndex];
+            await LoadImageAsync(file);
+        }
+
+        private async Task LoadImageListAsync(StorageFile imageFile)
+        {
+            _isLoadingFileList = true;
+            UpdateNavigationButtonsState();
+
+            try
+            {
+                // 获取当前图片所在的文件夹
+                StorageFolder newFolder = await imageFile.GetParentAsync();
+
+                // 检查文件夹是否变化
+                bool folderChanged = _currentFolder == null ||
+                                   !_currentFolder.IsEqual(newFolder);
+
+                if (folderChanged)
+                {
+                    // 将文件夹添加到 FutureAccessList 以获取持久访问权限
+                    string token = StorageApplicationPermissions.FutureAccessList.Add(newFolder);
+
+                    // 获取文件夹中的所有文件
+                    var files = await newFolder.GetFilesAsync();
+
+                    // 过滤出支持的图片类型
+                    var imageExtensions = new[]
+                    {
+                ".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff",
+                ".webp", ".heic", ".jxr", ".hdr", ".exr"
+            };
+
+                    _fileList = files
+                        .Where(f => imageExtensions.Contains(f.FileType.ToLowerInvariant()))
+                        .OrderByDescending(f => f.DateCreated) // 使用文件创建时间排序
+                        .Take(1000)
+                        .ToList();
+
+                    _currentFolder = newFolder;
+                    Debug.WriteLine($"已加载新目录: {newFolder.Name}, 文件数量: {_fileList.Count}");
+                }
+
+                // 更新当前索引
+                _currentIndex = _fileList.FindIndex(f => f.Path.Equals(imageFile.Path, StringComparison.OrdinalIgnoreCase));
+
+                if (_currentIndex < 0 && _fileList.Count > 0)
+                {
+                    _currentIndex = 0;
+                    Debug.WriteLine($"文件不在列表中，使用第一个文件: {_fileList[0].Name}");
+                }
+                else
+                {
+                    Debug.WriteLine($"当前索引: {_currentIndex}, 文件: {imageFile.Name}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"LoadImageListAsync 错误: 没有权限");
+                _currentFolder = null;
+                _fileList = new List<StorageFile>();
+                _currentIndex = -1;
+            }
+            finally
+            {
+                // 无论成功或失败，都更新加载状态
+                _isLoadingFileList = false;
+                UpdateNavigationButtonsState();
+            }
+        }
+
         public async Task LoadImageAsync(StorageFile imageFile)
         {
             // File format handler registration is static vs. OS version (in the appxmanifset), so a user may attempt to activate
@@ -467,6 +612,8 @@ namespace HDRImageViewerCS
             {
                 return;
             }
+            //LoadImageListAsync
+            LoadImageListAsync(imageFile);
 
             isImageValid = false;
             ExposureAdjustSlider.IsEnabled = false;
@@ -503,6 +650,34 @@ namespace HDRImageViewerCS
 
             if (info.isValid == false)
             {
+                if (_currentIndex >= 0 && _currentIndex < _fileList.Count)
+                {
+                    _fileList.RemoveAt(_currentIndex);
+                    Debug.WriteLine($"已移除无效文件: {imageFile.Name}");
+                }
+
+                // 尝试加载下一个可用文件
+                if (_fileList.Count > 0)
+                {
+                    // 确保索引在合法范围内
+                    int newIndex = Math.Min(_currentIndex, _fileList.Count - 1);
+
+                    // 直接使用 StorageFile 对象
+                    StorageFile nextFile = _fileList[newIndex];
+                    await LoadImageAsync(nextFile);
+                }
+                else
+                {
+                    // 没有有效文件，重置状态
+                    _currentFolder = null;
+                    _fileList = new List<StorageFile>();
+                    _currentIndex = -1;
+                    SetWindowTitle("没有可用的图片");
+
+                    // 更新导航按钮状态
+                    UpdateNavigationButtonsState();
+                }
+
                 // Exit before any of the current image state is modified.
                 ErrorContentDialog dialog;
 
@@ -569,6 +744,7 @@ namespace HDRImageViewerCS
                 ExportImageButton.IsEnabled = false;
             }
 
+            UpdateNavigationButtonsState();
             UpdateDefaultRenderOptions();
         }
 

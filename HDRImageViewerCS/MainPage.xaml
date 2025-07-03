@@ -71,6 +71,26 @@
         <!-- <Rectangle Grid.Row="0" Grid.RowSpan="3" Grid.Column="0" Fill="{StaticResource SystemControlAcrylicElementBrush}" /> -->
         <StackPanel x:Name="ControlsPanel" Grid.Row="1" Grid.Column="0" MinWidth="200"> <!-- Avoid changing layout from render effect change -->
             <Button x:Name="OpenButton" Click="OpenImageButton_Click">Open image</Button>
+
+            <!-- 添加导航按钮 -->
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                <Button x:Name="PrevImageButton" 
+                Content="&lt; Prev" 
+                Click="PrevImageButton_Click"
+                Margin="8,0,0,0"
+                IsEnabled="False"
+                ToolTipService.ToolTip="Previous image (Left Arrow)"
+                Width="80"/>
+
+                <Button x:Name="NextImageButton" 
+                Content="Next &gt;" 
+                Click="NextImageButton_Click"
+                Margin="8,0,0,0"
+                IsEnabled="False"
+                ToolTipService.ToolTip="Next image (Right Arrow)"
+                Width="80"/>
+            </StackPanel>
+            
             <Button x:Name="ExportImageButton" Click="ExportImageButton_Click" IsEnabled="False">Export image</Button>
             <StackPanel x:Name="RenderEffectPanel">
                 <TextBlock>Render Effect:</TextBlock>
