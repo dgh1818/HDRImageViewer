@@ -1379,7 +1379,7 @@ void ImageLoader::CreateCpuMergedBitmap()
     //}
 
     initLUT();
-    
+
     // 设置OpenMP并行
     #pragma omp parallel for
     for (int y = 0; y < static_cast<int>(height); y++)
@@ -1408,6 +1408,10 @@ void ImageLoader::CreateCpuMergedBitmap()
             float gainB = gainRow[4 * x + 0] / 128.0f; // [0.0, 2.0]
             float gainG = gainRow[4 * x + 1] / 128.0f;
             float gainR = gainRow[4 * x + 2] / 128.0f;
+
+            gainB = lut_sRGBToLinear(gainB);
+            gainG = lut_sRGBToLinear(gainG);
+            gainR = lut_sRGBToLinear(gainR);
 
             // 应用增益公式
             R_main = powf(2.0f, gainR) * (R_main + eps) - eps;
