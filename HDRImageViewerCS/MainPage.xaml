@@ -17,6 +17,8 @@
         <KeyboardAccelerator Key="F11" Invoked="ToggleFullscreenInvoked" />
         <KeyboardAccelerator Key="Escape" Invoked="EscapeFullscreenInvoked" />
         <KeyboardAccelerator Key="F1" Modifiers="Control" Invoked="ToggleExperimentalToolsInvoked" />
+        <KeyboardAccelerator Key="Left" Invoked="PrevImageInvoked" />
+        <KeyboardAccelerator Key="Right" Invoked="NextImageInvoked" />
     </Page.KeyboardAccelerators>
 
     <Grid>

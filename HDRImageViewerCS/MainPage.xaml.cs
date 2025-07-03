@@ -537,6 +537,44 @@ namespace HDRImageViewerCS
             await LoadImageAsync(file);
         }
 
+        private void PrevImageInvoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+        {
+            if (WorkaroundShouldIgnoreAccelerator()) return;
+
+            // 防止在加载中重复触发
+            if (_isLoadingFileList || _isLoadingImage)
+            {
+                args.Handled = true;
+                return;
+            }
+
+            // 模拟点击"上一张"按钮
+            if (PrevImageButton.IsEnabled)
+            {
+                PrevImageButton_Click(null, null);
+                args.Handled = true;
+            }
+        }
+
+        private void NextImageInvoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+        {
+            if (WorkaroundShouldIgnoreAccelerator()) return;
+
+            // 防止在加载中重复触发
+            if (_isLoadingFileList || _isLoadingImage)
+            {
+                args.Handled = true;
+                return;
+            }
+
+            // 模拟点击"下一张"按钮
+            if (NextImageButton.IsEnabled)
+            {
+                NextImageButton_Click(null, null);
+                args.Handled = true;
+            }
+        }
+
         private async Task LoadImageListAsync(StorageFile imageFile)
         {
             _isLoadingFileList = true;
