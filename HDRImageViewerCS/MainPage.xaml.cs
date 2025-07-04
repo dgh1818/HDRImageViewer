@@ -260,7 +260,7 @@ namespace HDRImageViewerCS
 
                 case AdvancedColorKind.HighDynamicRange:
                     // HDR images need to be tonemapped regardless of display kind.
-                    RenderEffectCombo.SelectedIndex = 1; // See RenderOptions.h for which value this indicates.
+                    RenderEffectCombo.SelectedIndex = 0; // See RenderOptions.h for which value this indicates.
 
                     ExposureAdjustPanel.Visibility = Visibility.Visible;
                     break;

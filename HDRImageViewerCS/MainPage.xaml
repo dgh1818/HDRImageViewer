@@ -179,7 +179,7 @@
                            HorizontalAlignment="Center"
                            Text="Use arrow keys or buttons to navigate"/>
             </StackPanel>
-            
+            <Button x:Name="OpenButton" Click="OpenImageButton_Click">Open image</Button>
             <Button x:Name="ExportImageButton" Click="ExportImageButton_Click" IsEnabled="False">Export image</Button>
             <StackPanel x:Name="RenderEffectPanel">
                 <TextBlock>Render Effect:</TextBlock>
