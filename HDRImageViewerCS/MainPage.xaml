@@ -56,6 +56,73 @@
             <Style TargetType="ComboBox" BasedOn="{StaticResource DefaultComboBoxStyle}">
                 <Setter Property="Margin" Value="8, 8, 8, 8" />
             </Style>
+            <Style x:Key="NavigationButtonStyle" TargetType="Button">
+                <Setter Property="Background" Value="#99000000"/>
+                <Setter Property="Foreground" Value="White"/>
+                <Setter Property="BorderBrush" Value="#66FFFFFF"/>
+                <Setter Property="BorderThickness" Value="1"/>
+                <Setter Property="CornerRadius" Value="4"/>
+                <Setter Property="MinWidth" Value="100"/>
+                <Setter Property="FontWeight" Value="SemiBold"/>
+                <Setter Property="Opacity" Value="0.8"/>
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="Button">
+                            <Grid>
+                                <VisualStateManager.VisualStateGroups>
+                                    <VisualStateGroup x:Name="CommonStates">
+                                        <VisualState x:Name="Normal"/>
+                                        <VisualState x:Name="PointerOver">
+                                            <Storyboard>
+                                                <ObjectAnimationUsingKeyFrames Storyboard.TargetName="Background" Storyboard.TargetProperty="Background">
+                                                    <DiscreteObjectKeyFrame KeyTime="0" Value="#CC000000"/>
+                                                </ObjectAnimationUsingKeyFrames>
+                                                <ObjectAnimationUsingKeyFrames Storyboard.TargetName="Background" Storyboard.TargetProperty="BorderBrush">
+                                                    <DiscreteObjectKeyFrame KeyTime="0" Value="#AAFFFFFF"/>
+                                                </ObjectAnimationUsingKeyFrames>
+                                            </Storyboard>
+                                        </VisualState>
+                                        <VisualState x:Name="Pressed">
+                                            <Storyboard>
+                                                <ObjectAnimationUsingKeyFrames Storyboard.TargetName="Background" Storyboard.TargetProperty="Background">
+                                                    <DiscreteObjectKeyFrame KeyTime="0" Value="#B3000000"/>
+                                                </ObjectAnimationUsingKeyFrames>
+                                                <ObjectAnimationUsingKeyFrames Storyboard.TargetName="Background" Storyboard.TargetProperty="BorderBrush">
+                                                    <DiscreteObjectKeyFrame KeyTime="0" Value="#CCFFFFFF"/>
+                                                </ObjectAnimationUsingKeyFrames>
+                                            </Storyboard>
+                                        </VisualState>
+                                        <VisualState x:Name="Disabled">
+                                            <Storyboard>
+                                                <ObjectAnimationUsingKeyFrames Storyboard.TargetName="Background" Storyboard.TargetProperty="Opacity">
+                                                    <DiscreteObjectKeyFrame KeyTime="0" Value="0.4"/>
+                                                </ObjectAnimationUsingKeyFrames>
+                                            </Storyboard>
+                                        </VisualState>
+                                    </VisualStateGroup>
+                                </VisualStateManager.VisualStateGroups>
+
+                                <Border x:Name="Background"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="{TemplateBinding CornerRadius}">
+                                    <ContentPresenter x:Name="ContentPresenter"
+                                              Content="{TemplateBinding Content}"
+                                              HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"/>
+                                </Border>
+                            </Grid>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+            <Style x:Key="NavigationPanelStyle" TargetType="StackPanel">
+                <Setter Property="Background" Value="{ThemeResource SystemControlAcrylicElementBrush}"/>
+                <Setter Property="CornerRadius" Value="8"/>
+                <Setter Property="Padding" Value="12"/>
+                <Setter Property="Margin" Value="8,0,8,16"/>
+            </Style>
             <local:SdrExposureFormatter x:Key="SdrExposureFormatter"/>
         </Grid.Resources>
         <Grid.ColumnDefinitions>
@@ -71,26 +138,46 @@
         <SwapChainPanel x:Name="swapChainPanel" Grid.Row="0" Grid.RowSpan="3" Grid.Column="1"/>
         <!-- UI -->
         <!-- <Rectangle Grid.Row="0" Grid.RowSpan="3" Grid.Column="0" Fill="{StaticResource SystemControlAcrylicElementBrush}" /> -->
-        <StackPanel x:Name="ControlsPanel" Grid.Row="1" Grid.Column="0" MinWidth="200"> <!-- Avoid changing layout from render effect change -->
-            <Button x:Name="OpenButton" Click="OpenImageButton_Click">Open image</Button>
+        <StackPanel x:Name="ControlsPanel" 
+                    Grid.Row="0" Grid.Column="0" Grid.RowSpan="3"
+                    MinWidth="200"
+                    Background="{ThemeResource SystemControlAcrylicElementBrush}">
 
-            <!-- 添加导航按钮 -->
-            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-                <Button x:Name="PrevImageButton" 
-                Content="&lt; Prev" 
-                Click="PrevImageButton_Click"
-                Margin="8,0,0,0"
-                IsEnabled="False"
-                ToolTipService.ToolTip="Previous image (Left Arrow)"
-                Width="80"/>
+            <!-- 导航面板 - 固定在控制面板顶部 -->
+            <StackPanel Orientation="Vertical" 
+                        HorizontalAlignment="Stretch"
+                        VerticalAlignment="Top"
+                        Style="{StaticResource NavigationPanelStyle}">
+                <TextBlock Text="Navigation" 
+                           Style="{StaticResource SectionTitle}"
+                           Margin="0,0,0,8"/>
 
-                <Button x:Name="NextImageButton" 
-                Content="Next &gt;" 
-                Click="NextImageButton_Click"
-                Margin="8,0,0,0"
-                IsEnabled="False"
-                ToolTipService.ToolTip="Next image (Right Arrow)"
-                Width="80"/>
+                <StackPanel Orientation="Horizontal" 
+                            HorizontalAlignment="Center"
+                            Margin="0,0,0,8">
+                    <Button x:Name="PrevImageButton" 
+                            Content="&lt; Prev" 
+                            Click="PrevImageButton_Click"
+                            FontSize="16"
+                            IsEnabled="False"
+                            ToolTipService.ToolTip="Previous image (Left Arrow)"
+                            Style="{StaticResource NavigationButtonStyle}"
+                            Width="100"/>
+
+                    <Button x:Name="NextImageButton" 
+                            Content="Next &gt;" 
+                            Click="NextImageButton_Click"
+                            FontSize="16"
+                            Margin="16,0,0,0"
+                            IsEnabled="False"
+                            ToolTipService.ToolTip="Next image (Right Arrow)"
+                            Style="{StaticResource NavigationButtonStyle}"
+                            Width="100"/>
+                </StackPanel>
+
+                <TextBlock Style="{StaticResource InfoLine}" 
+                           HorizontalAlignment="Center"
+                           Text="Use arrow keys or buttons to navigate"/>
             </StackPanel>
             
             <Button x:Name="ExportImageButton" Click="ExportImageButton_Click" IsEnabled="False">Export image</Button>
@@ -136,7 +223,7 @@
             <TextBlock Style="{StaticResource InfoLine}"><Bold>H:</Bold> Toggle UI</TextBlock>
             <TextBlock Style="{StaticResource InfoLine}"><Bold>F, F11:</Bold> Toggle fullscreen</TextBlock>
             <TextBlock Style="{StaticResource InfoLine}"><Bold>Esc:</Bold> Exit fullscreen</TextBlock>
-            <StackPanel x:Name="ExperimentalTools" Visibility="Collapsed">
+            <StackPanel x:Name="ExperimentalTools" >
                 <MenuFlyoutSeparator />
                 <TextBlock Style="{StaticResource SectionTitle}">Experimental tools</TextBlock>
                 <TextBlock Style="{StaticResource InfoLine}">Press CTRL+F1 to turn off</TextBlock>

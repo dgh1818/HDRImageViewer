@@ -605,9 +605,7 @@ namespace HDRImageViewerCS
             };
 
                     _fileList = files
-                        .Where(f => imageExtensions.Contains(f.FileType.ToLowerInvariant()))
-                        .OrderByDescending(f => f.DateCreated) // 使用文件创建时间排序
-                        .Take(1000)
+                        .OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase)
                         .ToList();
 
                     _currentFolder = newFolder;
