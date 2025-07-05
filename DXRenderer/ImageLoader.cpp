@@ -615,7 +615,31 @@ bool ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapF
     int firstStart = -1, firstEnd = -1;
     int secondStart = -1, secondEnd = -1;
 
-    for (int i = 4; i < len - 3; ++i)
+    int gainmap_sos = -1;
+    int gainmap_eoi = -1;
+    int app2_start = -1, app2_end = -1;
+    int gainmap_start = -1;
+
+    for (int i = 0; i < len - 3; ++i)
+    {
+        if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD8 &&
+            jpegData[i + 2] == 0xFF && jpegData[i + 3] == 0xE0)
+        {
+            firstStart = i;
+            break;
+        }
+    }
+
+    for (int i = firstStart; i < len - 1; ++i)
+    {
+        if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD9)
+        {
+            firstEnd = i + 1;
+            break;
+        }
+    }
+
+    for (int i = firstEnd; i < len - 3; ++i)
     {
         if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD8 &&
             jpegData[i + 2] == 0xFF && jpegData[i + 3] == 0xE5)
@@ -625,9 +649,25 @@ bool ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapF
         }
     }
 
-    if (secondStart == -1) {
-        return false;
+    for (int i = secondStart; i < len - 1; ++i)
+    {
+        if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD9)
+        {
+            secondEnd = i + 1;
+        }
     }
+
+    size_t sdrSize = firstEnd - firstStart + 1;
+    size_t gainSize = secondEnd - secondStart + 1;
+
+    sdrData.clear();
+    sdrData.resize(sdrSize);
+
+    gainmapData.clear();
+    gainmapData.resize(gainSize);
+
+    std::memcpy(sdrData.data(), jpegData.data() + firstStart, sdrSize);
+    std::memcpy(gainmapData.data(), jpegData.data() + sdrSize, gainSize);
 
     ULARGE_INTEGER ignore = {};
 
@@ -1379,6 +1419,15 @@ void ImageLoader::CreateCpuMergedBitmap()
     //}
 
     initLUT();
+    GainMapMaxR = 0;
+    GainMapMaxG = 0;
+    GainMapMaxB = 0;
+
+    GainMapBoost_max = 0;
+
+    float GainMapMaxR_boost = 0;
+    float GainMapMaxG_boost = 0;
+    float GainMapMaxB_boost = 0;
 
     // 设置OpenMP并行
     #pragma omp parallel for
@@ -1409,14 +1458,28 @@ void ImageLoader::CreateCpuMergedBitmap()
             float gainG = gainRow[4 * x + 1] / 128.0f;
             float gainR = gainRow[4 * x + 2] / 128.0f;
 
-            gainB = lut_sRGBToLinear(gainB);
-            gainG = lut_sRGBToLinear(gainG);
-            gainR = lut_sRGBToLinear(gainR);
+            GainMapMaxR = max(GainMapMaxR, gainR);
+            GainMapMaxG = max(GainMapMaxG, gainG);
+            GainMapMaxB = max(GainMapMaxB, gainB);
 
-            // 应用增益公式
-            R_main = powf(2.0f, gainR) * (R_main + eps) - eps;
-            G_main = powf(2.0f, gainG) * (G_main + eps) - eps;
-            B_main = powf(2.0f, gainB) * (B_main + eps) - eps;
+
+            /* gainB = lut_sRGBToLinear(gainB);
+             gainG = lut_sRGBToLinear(gainG);
+             gainR = lut_sRGBToLinear(gainR);*/
+
+
+             // 应用增益公式
+            float R_main_temp = powf(2.0f, gainR);
+            float G_main_temp = powf(2.0f, gainG);
+            float B_main_temp = powf(2.0f, gainB);
+
+            GainMapMaxR_boost = max(R_main_temp, GainMapMaxR_boost);
+            GainMapMaxG_boost = max(G_main_temp, GainMapMaxG_boost);
+            GainMapMaxB_boost = max(B_main_temp, GainMapMaxG_boost);
+
+            R_main = R_main_temp * (R_main + eps) - eps;
+            G_main = G_main_temp * (G_main + eps) - eps;
+            B_main = B_main_temp * (B_main + eps) - eps;
 
             // 写入目标像素（RGBA half）
             BYTE* targetPixel = rowStart + x * bytesPerPixel;
@@ -1431,6 +1494,10 @@ void ImageLoader::CreateCpuMergedBitmap()
     }
     lockOut.Reset();
     m_cpuMergedWICBitmapSource = outBitmap;
+
+    GainMapBoost_max = max(GainMapBoost_max, GainMapMaxR_boost);
+    GainMapBoost_max = max(GainMapBoost_max, GainMapMaxG_boost);
+    GainMapBoost_max = max(GainMapBoost_max, GainMapMaxB_boost);
 
     ComPtr<ID2D1ImageSourceFromWic> ID2D1ImageSource_merged;
 

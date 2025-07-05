@@ -108,6 +108,14 @@ namespace DXRenderer
         void ReleaseDeviceDependentResources();
         Microsoft::WRL::ComPtr<IWICBitmapSource>                m_cpuMergedWICBitmapSource;
 
+        float                                                   GainMapMaxR;
+        float                                                   GainMapMaxG;
+        float                                                   GainMapMaxB;
+
+        float                                                   GainMapBoost_max;
+        std::vector<BYTE>                                       sdrData;
+        std::vector<BYTE>                                       gainmapData;
+
     private:
         /// <summary>
         /// Throws if the internal ImageLoaderState does not match one of the valid values.
