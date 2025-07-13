@@ -17,6 +17,8 @@ namespace DXRenderer
         Windows::Foundation::Size                       gainMapPixelSize;
         bool                                            hasOverriddenColorProfile;
         bool                                            hasEXRChromaticitiesInfo;
+
+        bool                                            hasCuvaHdrGainMap;
     };
 
     public value struct ImageCLL

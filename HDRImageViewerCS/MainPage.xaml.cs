@@ -11,6 +11,7 @@ using Windows.Graphics.Display;
 using Windows.Storage;
 using Windows.Storage.AccessCache;
 using Windows.Storage.Pickers;
+using Windows.Storage.Pickers.Provider;
 using Windows.System;
 using Windows.UI.Core;
 using Windows.UI.Input;
@@ -39,6 +40,7 @@ namespace HDRImageViewerCS
         public ErrorDialogType errorType; // If this is not DefaultValue, triggers the error dialog.
         public string errorFilename; // Only use this if ErrorDialogType is InvalidFile.
         public string rawCommandLine;
+        
     }
 
     /// <summary>
@@ -52,6 +54,7 @@ namespace HDRImageViewerCS
         ImageInfo imageInfo;
         ImageCLL imageCLL;
         AdvancedColorInfo dispInfo;
+        string filename;
 
         bool isImageValid;
         bool isWindowVisible;
@@ -650,6 +653,7 @@ namespace HDRImageViewerCS
             }
             //LoadImageListAsync
             LoadImageListAsync(imageFile);
+            filename = imageFile.Name;
 
             isImageValid = false;
             ExposureAdjustSlider.IsEnabled = false;
@@ -810,8 +814,14 @@ namespace HDRImageViewerCS
             }
             else
             {
-                renderer.ExportImageToISOJpeg(ras);
-                //renderer.ExportImageToSdr(ras, wicFormat);
+                if(imageInfo.hasCuvaHdrGainMap)
+                {
+                    renderer.ExportImageToISOJpeg(ras);
+                }
+                else
+                {
+                    renderer.ExportImageToSdr(ras, wicFormat);
+                }
             }
         }
 
@@ -903,7 +913,8 @@ namespace HDRImageViewerCS
             var picker = new FileSavePicker
             {
                 SuggestedStartLocation = PickerLocationId.PicturesLibrary,
-                CommitButtonText = "Export image"
+                CommitButtonText = "Export image",
+                SuggestedFileName = filename
             };
 
             foreach (var format in UIStrings.FILEFORMATS_SAVE)

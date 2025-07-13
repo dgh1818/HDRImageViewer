@@ -141,7 +141,8 @@ void ImageLoader::LoadImageFromWicInt(_In_ IStream* imageStream)
     }
     else if (fmt == GUID_ContainerFormatJpeg)
     {
-        m_imageInfo.hasAppleHdrGainMap = TryLoadCuvaHdrGainMapJpegMpo(imageStream, frame.Get());
+        m_imageInfo.hasCuvaHdrGainMap = TryLoadCuvaHdrGainMapJpegMpo(imageStream, frame.Get());
+        m_imageInfo.hasAppleHdrGainMap = m_imageInfo.hasCuvaHdrGainMap;
         if(!m_imageInfo.hasAppleHdrGainMap) {
             m_imageInfo.hasAppleHdrGainMap = TryLoadAppleHdrGainMapJpegMpo(imageStream, frame.Get());
         }
@@ -765,6 +766,7 @@ bool ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapF
     );
 
     IFRF(fmt.As(&m_appleHdrGainMap.wicSource));
+
 
     return true;
 }
