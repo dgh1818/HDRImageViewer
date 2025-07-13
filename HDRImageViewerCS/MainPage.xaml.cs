@@ -40,7 +40,6 @@ namespace HDRImageViewerCS
         public ErrorDialogType errorType; // If this is not DefaultValue, triggers the error dialog.
         public string errorFilename; // Only use this if ErrorDialogType is InvalidFile.
         public string rawCommandLine;
-        
     }
 
     /// <summary>

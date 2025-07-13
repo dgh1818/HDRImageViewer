@@ -33,6 +33,10 @@
 
 Any device before(include) kirin9000s use the old CUVA standard HDR photo.(Which is not compatible with ISO standard)
 
+## Todo
+* 批量实现CUVA到ISO HDR的转换
+* 支持ISO HDR jpeg的查看
+
 
 Oringinal:
 ## About the Project
