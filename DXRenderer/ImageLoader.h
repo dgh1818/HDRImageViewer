@@ -108,13 +108,12 @@ namespace DXRenderer
         void ReleaseDeviceDependentResources();
         Microsoft::WRL::ComPtr<IWICBitmapSource>                m_cpuMergedWICBitmapSource;
 
-        float                                                   GainMapMaxR;
-        float                                                   GainMapMaxG;
-        float                                                   GainMapMaxB;
-
-        float                                                   GainMapBoost_max;
         std::vector<BYTE>                                       sdrData;
         std::vector<BYTE>                                       gainmapData;
+
+        std::vector<BYTE>                                       sdrData_changed;
+        void generateEncodeSDRimage();
+
 
     private:
         /// <summary>
@@ -220,5 +219,26 @@ namespace DXRenderer
 
         void initLUT();
         float lut_sRGBToLinear(float c);
+
+        struct ParseResult {
+            BYTE* exif_ptr = nullptr;
+            size_t exif_size = 0;
+            bool has_exif = false;
+            size_t exif_pos = 0;
+        };
+
+        int firstStart = -1, firstEnd = -1;
+        int secondStart = -1, secondEnd = -1;
+
+        int mainImageStart = -1, mainImageEnd = -1;
+        int thumbnailStart = -1, thumbnailEnd = -1;
+
+        size_t sdrSize;
+        size_t gainSize;
+
+        public:
+            ParseResult exif_result;
+            std::vector<BYTE> changedImage;
+
     };
 }

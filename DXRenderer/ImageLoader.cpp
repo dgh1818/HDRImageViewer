@@ -590,15 +590,22 @@ bool ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapF
     STATSTG stats = {};
     IFRF(imageStream->Stat(&stats, STATFLAG_NONAME));
 
+
+
     // Heuristic: Allow any Apple manufactured device.
     ComPtr<IWICMetadataQueryReader> query;
     CPropVariant cuvaMftr;
+    CPropVariant propvarTitle;
 
     IFRF(frame->GetMetadataQueryReader(&query));
+    IFRF(query->GetMetadataByName(L"/app1/ifd/{ushort=270}", &propvarTitle));
     IFRF(query->GetMetadataByName(L"/app1/ifd/{ushort=271}", &cuvaMftr));
 
     if (cuvaMftr.vt != VT_LPSTR) return false;
     if (strcmp("HUAWEI", cuvaMftr.pszVal) != 0) return false;
+
+    if (propvarTitle.vt != VT_LPSTR) return false;
+    if (strcmp("_cuva", propvarTitle.pszVal) != 0) return false;
 
     LARGE_INTEGER zero = {};
     imageStream->Seek(zero, STREAM_SEEK_SET, nullptr);
@@ -612,38 +619,79 @@ bool ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapF
     imageStream->Read(jpegData.data(), stats.cbSize.QuadPart, &read);
 
     int len = stats.cbSize.QuadPart;
-    int firstStart = -1, firstEnd = -1;
-    int secondStart = -1, secondEnd = -1;
+    firstStart = -1, firstEnd = -1;
+    secondStart = -1, secondEnd = -1;
+
+    mainImageStart = -1, mainImageEnd = -1;
+    thumbnailStart = -1, thumbnailEnd = -1;
+
+    sdrSize -1;
+    gainSize = -1;
 
     int gainmap_sos = -1;
     int gainmap_eoi = -1;
     int app2_start = -1, app2_end = -1;
     int gainmap_start = -1;
 
+    const BYTE exif_signature[6] = { 0x45, 0x78, 0x69, 0x66, 0x00, 0x00 };
+    size_t exif_pos = -1;
+    exif_result.has_exif = false;
+    exif_result.exif_ptr = nullptr;
+
+    for (int i = 0; i < len - 10; ++i)
+    {
+        if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xE1) {
+
+            // 验证EXIF签名
+            if (i + 9 < len &&
+                memcmp(&jpegData[i + 4], exif_signature, sizeof(exif_signature)) == 0) {
+
+                // 设置EXIF位置和大小
+                exif_pos = i + 4;
+                exif_result.exif_pos = i + 4;
+
+                exif_result.exif_ptr = &jpegData[exif_pos];
+                exif_result.has_exif = true;
+
+                break;
+            }
+        }
+    }
+    
     for (int i = 0; i < len - 3; ++i)
     {
         if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD8 &&
             jpegData[i + 2] == 0xFF && jpegData[i + 3] == 0xE0)
         {
+            if (exif_result.has_exif)
+            {
+                exif_result.exif_size = i - exif_result.exif_pos;
+            }
+            
             firstStart = i;
+            thumbnailStart = i + 2;
             break;
         }
     }
 
-    for (int i = firstStart; i < len - 1; ++i)
+    for (int i = firstStart+ 5; i < len - 1; ++i)
     {
-        if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD9)
+        if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xE0)
         {
-            firstEnd = i + 1;
+            thumbnailEnd = i - 1;
+            mainImageStart = i;
+            
             break;
         }
     }
 
-    for (int i = firstEnd; i < len - 3; ++i)
+    for (int i = firstStart; i < len - 3; ++i)
     {
         if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD8 &&
             jpegData[i + 2] == 0xFF && jpegData[i + 3] == 0xE5)
         {
+            mainImageEnd = i - 3;
+            firstEnd = i - 1;
             secondStart = i;
             break;
         }
@@ -654,20 +702,23 @@ bool ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapF
         if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD9)
         {
             secondEnd = i + 1;
+            break;
         }
     }
-
-    size_t sdrSize = firstEnd - firstStart + 1;
-    size_t gainSize = secondEnd - secondStart + 1;
+    sdrSize = firstEnd - firstStart + 1;
+    gainSize = secondEnd - secondStart + 1;
 
     sdrData.clear();
     sdrData.resize(sdrSize);
 
+    sdrData_changed.clear();
+    sdrData_changed.resize(sdrSize);
+    
     gainmapData.clear();
     gainmapData.resize(gainSize);
-
+    
     std::memcpy(sdrData.data(), jpegData.data() + firstStart, sdrSize);
-    std::memcpy(gainmapData.data(), jpegData.data() + sdrSize, gainSize);
+    std::memcpy(gainmapData.data(), jpegData.data() + secondStart, gainSize);
 
     ULARGE_INTEGER ignore = {};
 
@@ -1419,15 +1470,8 @@ void ImageLoader::CreateCpuMergedBitmap()
     //}
 
     initLUT();
-    GainMapMaxR = 0;
-    GainMapMaxG = 0;
-    GainMapMaxB = 0;
 
-    GainMapBoost_max = 0;
 
-    float GainMapMaxR_boost = 0;
-    float GainMapMaxG_boost = 0;
-    float GainMapMaxB_boost = 0;
 
     // 设置OpenMP并行
     #pragma omp parallel for
@@ -1458,10 +1502,6 @@ void ImageLoader::CreateCpuMergedBitmap()
             float gainG = gainRow[4 * x + 1] / 128.0f;
             float gainR = gainRow[4 * x + 2] / 128.0f;
 
-            GainMapMaxR = max(GainMapMaxR, gainR);
-            GainMapMaxG = max(GainMapMaxG, gainG);
-            GainMapMaxB = max(GainMapMaxB, gainB);
-
 
             /* gainB = lut_sRGBToLinear(gainB);
              gainG = lut_sRGBToLinear(gainG);
@@ -1473,9 +1513,6 @@ void ImageLoader::CreateCpuMergedBitmap()
             float G_main_temp = powf(2.0f, gainG);
             float B_main_temp = powf(2.0f, gainB);
 
-            GainMapMaxR_boost = max(R_main_temp, GainMapMaxR_boost);
-            GainMapMaxG_boost = max(G_main_temp, GainMapMaxG_boost);
-            GainMapMaxB_boost = max(B_main_temp, GainMapMaxG_boost);
 
             R_main = R_main_temp * (R_main + eps) - eps;
             G_main = G_main_temp * (G_main + eps) - eps;
@@ -1494,10 +1531,6 @@ void ImageLoader::CreateCpuMergedBitmap()
     }
     lockOut.Reset();
     m_cpuMergedWICBitmapSource = outBitmap;
-
-    GainMapBoost_max = max(GainMapBoost_max, GainMapMaxR_boost);
-    GainMapBoost_max = max(GainMapBoost_max, GainMapMaxG_boost);
-    GainMapBoost_max = max(GainMapBoost_max, GainMapMaxB_boost);
 
     ComPtr<ID2D1ImageSourceFromWic> ID2D1ImageSource_merged;
 
@@ -1577,4 +1610,28 @@ float ImageLoader::lut_sRGBToLinear(float c) {
     int index = static_cast<int>(c * 255.0f + 0.5f);
     index = max(0, min(255, index));
     return sRGBToLinearLUT[index];
+}
+
+void ImageLoader::generateEncodeSDRimage() {
+    //原本缩略图在前，原始图在后，解码时会优先查看缩略图，因此在导出ISO HDR时需要颠倒数据位置
+    changedImage.clear();
+    changedImage = jpegData;
+    std::memcpy(changedImage.data() + thumbnailStart, jpegData.data() + mainImageStart, mainImageEnd - mainImageStart + 1);
+    std::memcpy(changedImage.data() + thumbnailStart + mainImageEnd - mainImageStart + 1, jpegData.data() + thumbnailStart, thumbnailEnd - thumbnailStart + 1);
+
+    exif_result.exif_ptr = &changedImage[exif_result.exif_pos];
+
+    for (int i = 0; i < changedImage.size(); i++) {
+        if (changedImage[i] == 0x5F && changedImage[i + 1] == 0x63 &&
+            changedImage[i + 2] == 0x75 && changedImage[i + 3] == 0x76 && changedImage[i + 4] == 0x61)
+        {
+            changedImage[i] = 0x00;
+            changedImage[i + 1] = 0x00;
+            changedImage[i + 2] = 0x00;
+            changedImage[i + 3] = 0x00;
+            changedImage[i + 4] = 0x00;
+        }
+    }
+
+    std::memcpy(sdrData_changed.data(), changedImage.data() + firstStart, sdrSize);
 }

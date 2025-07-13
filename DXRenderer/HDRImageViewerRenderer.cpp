@@ -9,6 +9,8 @@
 #include <iostream>
 #include <Windows.h>
 
+#include <fstream>
+
 using namespace DXRenderer;
 
 using namespace DirectX;
@@ -23,6 +25,7 @@ using namespace Windows::Storage::Streams;
 using namespace Windows::UI::Input;
 using namespace Windows::UI::Xaml;
 using namespace Windows::UI::Xaml::Controls;
+using namespace jpegR;
 
 HDRImageViewerRenderer::HDRImageViewerRenderer(
     SwapChainPanel^ panel) :
@@ -305,6 +308,31 @@ void HDRImageViewerRenderer::ExportAsDdsTest(_In_ IRandomAccessStream^ outputStr
     ImageExporter::ExportToDds(bitmap.Get(), iStream.Get(), DXGI_FORMAT_R10G10B10A2_UNORM);
 }
 
+void HDRImageViewerRenderer::ExportImageToISOJpeg(Windows::Storage::Streams::IRandomAccessStream^ outputStream)
+{
+    startEncodeISOJpeg();
+
+    DataWriter^ writer = ref new DataWriter(outputStream);
+
+
+    writer->WriteBytes(
+        Platform::ArrayReference<byte>(
+            static_cast<byte*>(this->outputImage.data()),
+            static_cast<unsigned int>(this->outputImage.size())
+        )
+    );
+
+    concurrency::create_task(writer->StoreAsync())
+        .then([writer](unsigned int bytesStored) {
+        // 5. 刷新流
+        return concurrency::create_task(writer->FlushAsync());
+            })
+        .then([writer](bool flushResult) {
+        // 6. 清理资源 (在最后一步删除 writer)
+        delete writer;
+            });
+}
+
 /// <summary>
 /// Save any supported HDR format as HDR JPEG XR. Not guaranteed to be lossless since we run the
 /// full render pipeline.
@@ -345,11 +373,11 @@ void HDRImageViewerRenderer::ExportImageToJxr(Windows::Storage::Streams::IRandom
     ComPtr<ID2D1Image> outputImage;
     m_finalOutput->GetOutput(&outputImage);
 
-    ImageExporter::ExportToWic(outputImage.Get(),
+   /* ImageExporter::ExportToWic(outputImage.Get(),
         m_imageInfo.pixelSize,
         m_deviceResources.get(),
         iStream.Get(),
-        GUID_ContainerFormatWmp);
+        GUID_ContainerFormatWmp);*/
 
     // Restore all state.
     m_zoom = saved_zoom;
@@ -363,6 +391,33 @@ void HDRImageViewerRenderer::ExportImageToJxr(Windows::Storage::Streams::IRandom
         saved_dispMaxCLLOverride,
         saved_dispInfo,
         saved_constrainGamut);
+
+
+    startEncodeISOJpeg();
+
+    DataWriter^ writer = ref new DataWriter(outputStream);
+
+   
+        writer->WriteBytes(
+            Platform::ArrayReference<byte>(
+                static_cast<byte*>(this->outputImage.data()),
+                static_cast<unsigned int>(this->outputImage.size())
+            )
+        );
+
+        concurrency::create_task(writer->StoreAsync())
+            .then([writer](unsigned int bytesStored) {
+            // 5. 刷新流
+            return concurrency::create_task(writer->FlushAsync());
+                })
+            .then([writer](bool flushResult) {
+            // 6. 清理资源 (在最后一步删除 writer)
+            delete writer;
+                });
+
+    //    // 4. 刷新流
+    //    auto flushAsync = writer->FlushAsync();
+    //    concurrency::create_task(flushAsync).wait();
 }
 
 // Configures a Direct2D image pipeline, including source, color management, 
@@ -1096,3 +1151,976 @@ void HDRImageViewerRenderer::OnDeviceRestored()
 
     Draw();
 }
+
+void HDRImageViewerRenderer::startEncodeISOJpeg() {
+    m_imageLoader->generateEncodeSDRimage();
+
+    if(m_imageLoader->exif_result.has_exif) {
+        jpegR::parse_result.exif_ptr = m_imageLoader->exif_result.exif_ptr;
+        jpegR::parse_result.exif_size = m_imageLoader->exif_result.exif_size;
+        jpegR::parse_result.has_exif = m_imageLoader->exif_result.has_exif;
+        jpegR::parse_result.exif_pos = m_imageLoader->exif_result.exif_pos;
+    }
+
+    jpegR::encodeISOJpeg(
+        m_imageInfo.pixelSize.Width,
+        m_imageInfo.pixelSize.Height,
+        m_imageLoader->sdrData_changed,
+        m_imageLoader->gainmapData,
+        10.f,
+        1.f,
+        1.f,
+        1.f / 64.f,
+        1.f / 64.f,
+        1.f,
+        10.f
+    );
+
+    outputImage = jpegR::output;
+}
+
+void jpegR::encodeISOJpeg(
+    int width,
+    int height,
+    std::vector<BYTE> sdrImage,   // 替换原来的BYTE* sdrData和int sdrSize
+    std::vector<BYTE> gainmapImage, // 替换原来的BYTE* gainmapData和int gainmapSize
+    float maxContentBoost,
+    float minContentBoost,
+    float gamma,
+    float offsetSdr,
+    float offsetHdr,
+    float hdrCapacityMin,
+    float hdrCapacityMax)
+{
+    // 1) 把原始字节流封装到 UltraHDR 需要的结构
+    jpegr_compressed_struct jpgSdr = {
+        /* data     */ (void*)sdrImage.data(),
+        /* length   */ sdrImage.size(),         // 使用 size() 获取大小
+        /* maxLength*/ sdrImage.size(),
+        /* colorGamut */ ULTRAHDR_COLORGAMUT_P3
+    };
+
+    jpegr_compressed_struct jpgGainmap = {
+        (void*)gainmapImage.data(),  // 使用 data() 获取指针
+        gainmapImage.size(),         // 使用 size() 获取大小
+        gainmapImage.size(),
+        ULTRAHDR_COLORGAMUT_P3
+    };
+
+    // 2) 构造 metadata
+    uhdr_gainmap_metadata_ext metadata;
+    metadata.version = "1.0";
+    for (int i = 0; i < 3; ++i) {
+        metadata.max_content_boost[i] = maxContentBoost;
+        metadata.min_content_boost[i] = minContentBoost;
+        metadata.gamma[i] = gamma;
+        metadata.offset_sdr[i] = offsetSdr;
+        metadata.offset_hdr[i] = offsetHdr;
+    }
+    metadata.hdr_capacity_min = hdrCapacityMin;
+    metadata.hdr_capacity_max = hdrCapacityMax;
+    metadata.use_base_cg = 1;  // 同基图色域
+
+    size_t maxOutSize = (size_t)width * height * 3; // 最坏情况
+    uhdr_compressed_image jpgOut;
+    std::memset(&jpgOut, 0, sizeof(jpgOut));
+    jpgOut.data = malloc(maxOutSize);
+    jpgOut.capacity = maxOutSize;
+    jpgOut.data_sz = 0;
+    jpgOut.cg = UHDR_CG_DISPLAY_P3;
+    
+
+    appendGainMap(reinterpret_cast<uhdr_compressed_image_t*>(&jpgSdr), reinterpret_cast<uhdr_compressed_image_t*>(&jpgGainmap), /* exif */ nullptr,
+        /* icc */ nullptr, /* icc size */ 0, &metadata, reinterpret_cast<uhdr_compressed_image_t*>(&jpgOut));
+
+    // 5) 拷贝输出数据到 std::vector<BYTE>
+    /*std::vector<BYTE> output;*/
+    output.resize(jpgOut.data_sz);
+    std::memcpy(output.data(), jpgOut.data, jpgOut.data_sz);
+
+    // 6) 释放中间 buffer
+    free(jpgOut.data);
+}
+
+jpegR::uhdr_error_info_t jpegR::appendGainMap(uhdr_compressed_image_t* sdr_intent_compressed,
+    uhdr_compressed_image_t* gainmap_compressed,
+    uhdr_mem_block_t* pExif, void* pIcc, size_t icc_size,
+    uhdr_gainmap_metadata_ext_t* metadata,
+    uhdr_compressed_image_t* dest) {
+    if (kWriteXmpMetadata && !metadata->use_base_cg) {
+        uhdr_error_info_t status;
+        status.error_code = UHDR_CODEC_UNSUPPORTED_FEATURE;
+        status.has_detail = 1;
+        snprintf(
+            status.detail, sizeof status.detail,
+            "setting gainmap application space as alternate image space in xmp mode is not supported");
+        return status;
+    }
+
+    if (kWriteXmpMetadata && !metadata->are_all_channels_identical()) {
+        uhdr_error_info_t status;
+        status.error_code = UHDR_CODEC_UNSUPPORTED_FEATURE;
+        status.has_detail = 1;
+        snprintf(status.detail, sizeof status.detail,
+            "signalling multichannel gainmap metadata in xmp mode is not supported");
+        return status;
+    }
+
+    const size_t xmpNameSpaceLength = kXmpNameSpace.size() + 1;  // need to count the null terminator
+    const size_t isoNameSpaceLength = kIsoNameSpace.size() + 1;  // need to count the null terminator
+
+    /////////////////////////////////////////////////////////////////////////////////////////////////
+    // calculate secondary image length first, because the length will be written into the primary //
+    // image xmp                                                                                   //
+    /////////////////////////////////////////////////////////////////////////////////////////////////
+
+    // XMP
+    string xmp_secondary;
+    size_t xmp_secondary_length;
+    if (kWriteXmpMetadata) {
+        xmp_secondary = generateXmpForSecondaryImage(*metadata);
+        // xmp_secondary_length = 2 bytes representing the length of the package +
+        //  + xmpNameSpaceLength = 29 bytes length
+        //  + length of xmp packet = xmp_secondary.size()
+        xmp_secondary_length = 2 + xmpNameSpaceLength + xmp_secondary.size();
+    }
+
+    // ISO
+    uhdr_gainmap_metadata_frac iso_secondary_metadata;
+    std::vector<uint8_t> iso_secondary_data;
+    size_t iso_secondary_length;
+    if (kWriteIso21496_1Metadata) {
+        UHDR_ERR_CHECK(gainmapMetadataFloatToFraction(
+            metadata, &iso_secondary_metadata));
+
+        UHDR_ERR_CHECK(encodeGainmapMetadata(&iso_secondary_metadata,
+            iso_secondary_data));
+        // iso_secondary_length = 2 bytes representing the length of the package +
+        //  + isoNameSpaceLength = 28 bytes length
+        //  + length of iso metadata packet = iso_secondary_data.size()
+        iso_secondary_length = 2 + isoNameSpaceLength + iso_secondary_data.size();
+    }
+
+    size_t secondary_image_size = gainmap_compressed->data_sz;
+    if (kWriteXmpMetadata) {
+        secondary_image_size += 2 /* 2 bytes length of APP1 sign */ + xmp_secondary_length;
+    }
+    if (kWriteIso21496_1Metadata) {
+        secondary_image_size += 2 /* 2 bytes length of APP2 sign */ + iso_secondary_length;
+    }
+
+    // Check if EXIF package presents in the JPEG input.
+  // If so, extract and remove the EXIF package.
+   /* JpegDecoderHelper decoder;
+    UHDR_ERR_CHECK(decoder.parseImage(sdr_intent_compressed->data, sdr_intent_compressed->data_sz));*/
+
+    uhdr_mem_block_t exif_from_jpg;
+    exif_from_jpg.data = nullptr;
+    exif_from_jpg.data_sz = 0;
+
+    parse_result.new_jpg_image.data = nullptr;
+    parse_result.new_jpg_image.data_sz = 0;
+    parse_result.new_jpg_image.capacity = 0;
+    parse_result.new_jpg_image.cg = UHDR_CG_UNSPECIFIED;
+    parse_result.new_jpg_image.ct = UHDR_CT_UNSPECIFIED;
+    parse_result.new_jpg_image.range = UHDR_CR_UNSPECIFIED;
+
+    if (!parse_image(sdr_intent_compressed, &parse_result)) {
+        uhdr_error_info_t status;
+        status.error_code = UHDR_CODEC_INVALID_PARAM;
+        status.has_detail = 1;
+        snprintf(status.detail, sizeof status.detail, "Failed to parse JPEG image");
+        return status;
+    }
+
+    //jpegR::parse_image(sdr_intent_compressed, &parse_result);
+
+
+
+    std::unique_ptr<uint8_t[]> dest_data;
+    /*if (decoder.getEXIFPos() >= 0) {*/
+    if (parse_result.exif_ptr!=nullptr) {
+        if (pExif != nullptr) {
+            uhdr_error_info_t status;
+            status.error_code = UHDR_CODEC_INVALID_PARAM;
+            status.has_detail = 1;
+            snprintf(status.detail, sizeof status.detail,
+                "received exif from uhdr_enc_set_exif_data() while the base image intent already "
+                "contains exif, unsure which one to use");
+            return status;
+        }
+        //copyJpegWithoutExif(&new_jpg_image, sdr_intent_compressed, decoder.getEXIFPos(),
+        //    decoder.getEXIFSize());
+        dest_data.reset(reinterpret_cast<uint8_t*>(parse_result.new_jpg_image.data));
+        //exif_from_jpg.data = decoder.getEXIFPtr();
+        exif_from_jpg.data = parse_result.exif_ptr;
+        //exif_from_jpg.data_sz = decoder.getEXIFSize();
+        exif_from_jpg.data_sz = parse_result.exif_size;
+        pExif = &exif_from_jpg;
+    }
+
+    uhdr_compressed_image_t* final_primary_jpg_image_ptr =
+        parse_result.new_jpg_image.data_sz == 0 ? sdr_intent_compressed : &parse_result.new_jpg_image;
+
+    size_t pos = 0;
+    // Begin primary image
+    // Write SOI
+    UHDR_ERR_CHECK(Write(dest, &kStart, 1, pos));
+    UHDR_ERR_CHECK(Write(dest, &kSOI, 1, pos));
+
+    // Write EXIF
+    if (pExif != nullptr) {
+        const size_t length = 2 + pExif->data_sz;
+        const uint8_t lengthH = ((length >> 8) & 0xff);
+        const uint8_t lengthL = (length & 0xff);
+        UHDR_ERR_CHECK(Write(dest, &kStart, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, &kAPP1, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, &lengthH, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, &lengthL, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, pExif->data, pExif->data_sz, pos));
+    }
+
+    // Prepare and write XMP
+    if (kWriteXmpMetadata) {
+        const string xmp_primary = generateXmpForPrimaryImage(secondary_image_size, *metadata);
+        const size_t length = 2 + xmpNameSpaceLength + xmp_primary.size();
+        const uint8_t lengthH = ((length >> 8) & 0xff);
+        const uint8_t lengthL = (length & 0xff);
+        UHDR_ERR_CHECK(Write(dest, &kStart, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, &kAPP1, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, &lengthH, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, &lengthL, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, (void*)kXmpNameSpace.c_str(), xmpNameSpaceLength, pos));
+        UHDR_ERR_CHECK(Write(dest, (void*)xmp_primary.c_str(), xmp_primary.size(), pos));
+    }
+
+    // Write ICC
+    if (pIcc != nullptr && icc_size > 0) {
+        const size_t length = icc_size + 2;
+        const uint8_t lengthH = ((length >> 8) & 0xff);
+        const uint8_t lengthL = (length & 0xff);
+        UHDR_ERR_CHECK(Write(dest, &kStart, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, &kAPP2, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, &lengthH, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, &lengthL, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, pIcc, icc_size, pos));
+    }
+
+    // Prepare and write ISO 21496-1 metadata
+    if (kWriteIso21496_1Metadata) {
+        const size_t length = 2 + isoNameSpaceLength + 4;
+        uint8_t zero = 0;
+        const uint8_t lengthH = ((length >> 8) & 0xff);
+        const uint8_t lengthL = (length & 0xff);
+        UHDR_ERR_CHECK(Write(dest, &kStart, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, &kAPP2, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, &lengthH, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, &lengthL, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, (void*)kIsoNameSpace.c_str(), isoNameSpaceLength, pos));
+        UHDR_ERR_CHECK(Write(dest, &zero, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, &zero, 1, pos));  // 2 bytes minimum_version: (00 00)
+        UHDR_ERR_CHECK(Write(dest, &zero, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, &zero, 1, pos));  // 2 bytes writer_version: (00 00)
+    }
+
+    // Prepare and write MPF
+    {
+        const size_t length = 2 + calculateMpfSize();
+        const uint8_t lengthH = ((length >> 8) & 0xff);
+        const uint8_t lengthL = (length & 0xff);
+        size_t primary_image_size = pos + length + final_primary_jpg_image_ptr->data_sz;
+        // between APP2 + package size + signature
+        // ff e2 00 58 4d 50 46 00
+        // 2 + 2 + 4 = 8 (bytes)
+        // and ff d8 sign of the secondary image
+        size_t secondary_image_offset = primary_image_size - pos - 8;
+        std::shared_ptr<DataStruct> mpf = generateMpf(primary_image_size, 0, /* primary_image_offset */
+            secondary_image_size, secondary_image_offset);
+        UHDR_ERR_CHECK(Write(dest, &kStart, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, &kAPP2, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, &lengthH, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, &lengthL, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, (void*)mpf->getData(), mpf->getLength(), pos));
+    }
+
+    // Write primary image
+    UHDR_ERR_CHECK(Write(dest, (uint8_t*)final_primary_jpg_image_ptr->data + 2,
+        final_primary_jpg_image_ptr->data_sz - 2, pos));
+    // Finish primary image
+
+    // Begin secondary image (gain map)
+    // Write SOI
+    UHDR_ERR_CHECK(Write(dest, &kStart, 1, pos));
+    UHDR_ERR_CHECK(Write(dest, &kSOI, 1, pos));
+
+    // Prepare and write XMP
+    if (kWriteXmpMetadata) {
+        const size_t length = xmp_secondary_length;
+        const uint8_t lengthH = ((length >> 8) & 0xff);
+        const uint8_t lengthL = (length & 0xff);
+        UHDR_ERR_CHECK(Write(dest, &kStart, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, &kAPP1, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, &lengthH, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, &lengthL, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, (void*)kXmpNameSpace.c_str(), xmpNameSpaceLength, pos));
+        UHDR_ERR_CHECK(Write(dest, (void*)xmp_secondary.c_str(), xmp_secondary.size(), pos));
+    }
+
+    // Prepare and write ISO 21496-1 metadata
+    if (kWriteIso21496_1Metadata) {
+        const size_t length = iso_secondary_length;
+        const uint8_t lengthH = ((length >> 8) & 0xff);
+        const uint8_t lengthL = (length & 0xff);
+        UHDR_ERR_CHECK(Write(dest, &kStart, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, &kAPP2, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, &lengthH, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, &lengthL, 1, pos));
+        UHDR_ERR_CHECK(Write(dest, (void*)kIsoNameSpace.c_str(), isoNameSpaceLength, pos));
+        UHDR_ERR_CHECK(Write(dest, (void*)iso_secondary_data.data(), iso_secondary_data.size(), pos));
+    }
+
+    // Write secondary image
+    UHDR_ERR_CHECK(
+        Write(dest, (uint8_t*)gainmap_compressed->data + 2, gainmap_compressed->data_sz - 2, pos));
+
+    // Set back length
+    dest->data_sz = pos;
+ 
+
+
+
+    // Done!
+    return g_no_error;
+}
+
+
+std::shared_ptr<DataStruct> jpegR::generateMpf(size_t primary_image_size, size_t primary_image_offset,
+    size_t secondary_image_size,
+    size_t secondary_image_offset) {
+    size_t mpf_size = calculateMpfSize();
+    std::shared_ptr<DataStruct> dataStruct = std::make_shared<DataStruct>(mpf_size);
+
+    dataStruct->write(static_cast<const void*>(kMpfSig), sizeof(kMpfSig));
+#if USE_BIG_ENDIAN_IN_MPF
+    dataStruct->write(static_cast<const void*>(kMpBigEndian), kMpEndianSize);
+#else
+    dataStruct->write(static_cast<const void*>(kMpLittleEndian), kMpEndianSize);
+#endif
+
+
+    // Set the Index IFD offset be the position after the endianness value and this offset.
+    constexpr uint32_t indexIfdOffset = static_cast<uint16_t>(kMpEndianSize + sizeof(kMpfSig));
+    dataStruct->write32(Endian_SwapBE32(indexIfdOffset));
+
+    // We will write 3 tags (version, number of images, MP entries).
+    dataStruct->write16(Endian_SwapBE16(kTagSerializedCount));
+
+    // Write the version tag.
+    dataStruct->write16(Endian_SwapBE16(kVersionTag));
+    dataStruct->write16(Endian_SwapBE16(kVersionType));
+    dataStruct->write32(Endian_SwapBE32(kVersionCount));
+    dataStruct->write(kVersionExpected, kVersionSize);
+
+    // Write the number of images.
+    dataStruct->write16(Endian_SwapBE16(kNumberOfImagesTag));
+    dataStruct->write16(Endian_SwapBE16(kNumberOfImagesType));
+    dataStruct->write32(Endian_SwapBE32(kNumberOfImagesCount));
+    dataStruct->write32(Endian_SwapBE32(kNumPictures));
+
+    // Write the MP entries.
+    dataStruct->write16(Endian_SwapBE16(kMPEntryTag));
+    dataStruct->write16(Endian_SwapBE16(kMPEntryType));
+    dataStruct->write32(Endian_SwapBE32(kMPEntrySize * kNumPictures));
+    const uint32_t mpEntryOffset =
+        static_cast<uint32_t>(dataStruct->getBytesWritten() -  // The bytes written so far
+            sizeof(kMpfSig) +                // Excluding the MPF signature
+            sizeof(uint32_t) +               // The 4 bytes for this offset
+            sizeof(uint32_t));  // The 4 bytes for the attribute IFD offset.
+    dataStruct->write32(Endian_SwapBE32(mpEntryOffset));
+
+    // Write the attribute IFD offset (zero because we don't write it).
+    dataStruct->write32(0);
+
+    // Write the MP entries for primary image
+    dataStruct->write32(Endian_SwapBE32(kMPEntryAttributeFormatJpeg | kMPEntryAttributeTypePrimary));
+    dataStruct->write32(Endian_SwapBE32(primary_image_size));
+    dataStruct->write32(Endian_SwapBE32(primary_image_offset));
+    dataStruct->write16(0);
+    dataStruct->write16(0);
+
+    // Write the MP entries for secondary image
+    dataStruct->write32(Endian_SwapBE32(kMPEntryAttributeFormatJpeg));
+    dataStruct->write32(Endian_SwapBE32(secondary_image_size));
+    dataStruct->write32(Endian_SwapBE32(secondary_image_offset));
+    dataStruct->write16(0);
+    dataStruct->write16(0);
+
+    return dataStruct;
+}
+
+string jpegR::generateXmpForPrimaryImage(size_t secondary_image_length,
+    uhdr_gainmap_metadata_ext_t& metadata) {
+    const vector<string> kConDirSeq({ kConDirectory, string("rdf:Seq") });
+    const vector<string> kLiItem({ string("rdf:li"), kConItem });
+
+    std::stringstream ss;
+    photos_editing_formats::image_io::XmlWriter writer(ss);
+    writer.StartWritingElement("x:xmpmeta");
+    writer.WriteXmlns("x", "adobe:ns:meta/");
+    writer.WriteAttributeNameAndValue("x:xmptk", "Adobe XMP Core 5.1.2");
+    writer.StartWritingElement("rdf:RDF");
+    writer.WriteXmlns("rdf", "http://www.w3.org/1999/02/22-rdf-syntax-ns#");
+    writer.StartWritingElement("rdf:Description");
+    writer.WriteXmlns(kContainerPrefix, kContainerUri);
+    writer.WriteXmlns(kItemPrefix, kItemUri);
+    writer.WriteXmlns(kGainMapPrefix, kGainMapUri);
+    writer.WriteAttributeNameAndValue(kMapVersion, metadata.version);
+
+    writer.StartWritingElements(kConDirSeq);
+
+    size_t item_depth = writer.StartWritingElement("rdf:li");
+    writer.WriteAttributeNameAndValue("rdf:parseType", "Resource");
+    writer.StartWritingElement(kConItem);
+    writer.WriteAttributeNameAndValue(kItemSemantic, kSemanticPrimary);
+    writer.WriteAttributeNameAndValue(kItemMime, kMimeImageJpeg);
+    writer.FinishWritingElementsToDepth(item_depth);
+
+    writer.StartWritingElement("rdf:li");
+    writer.WriteAttributeNameAndValue("rdf:parseType", "Resource");
+    writer.StartWritingElement(kConItem);
+    writer.WriteAttributeNameAndValue(kItemSemantic, kSemanticGainMap);
+    writer.WriteAttributeNameAndValue(kItemMime, kMimeImageJpeg);
+    writer.WriteAttributeNameAndValue(kItemLength, secondary_image_length);
+
+    writer.FinishWriting();
+
+    return ss.str();
+}
+
+bool jpegR::parse_image(uhdr_compressed_image_t* source_image, ParseResult* result)
+{
+    // 重置全局变量（如果使用）
+    //result->exif_ptr = nullptr;
+    //result->exif_size = 0;
+
+    // 验证输入数据
+    if (!source_image || !source_image->data || source_image->data_sz < 4) {
+        std::cerr << "无效的输入数据" << std::endl;
+        return false;
+    }
+
+    // 正确获取数据指针
+    BYTE* bytes = static_cast<BYTE*>(source_image->data);
+    const size_t data_sz = source_image->data_sz;
+
+    size_t exif_pos = -1;
+    size_t found_exif_size = 0;
+    bool has_exif = false;
+
+    if (parse_result.has_exif) {
+        result->exif_ptr = parse_result.exif_ptr;
+        result->exif_size = parse_result.exif_size;
+        found_exif_size = parse_result.exif_size;
+        exif_pos = parse_result.exif_pos;
+    }
+    
+    // 初始化输出图像结构
+    memset(&result->new_jpg_image, 0, sizeof(uhdr_compressed_image_t));
+
+    // 创建不含EXIF的新JPEG图像
+    // 但华为老CUVA格式SDR图本来就不含EXIF
+    result->new_jpg_image.data = malloc(data_sz);
+    if (!result->new_jpg_image.data) {
+        std::cerr << "内存分配失败: " << data_sz << " 字节" << std::endl;
+        return false;
+    }
+    memcpy(result->new_jpg_image.data, source_image->data, data_sz);
+    result->new_jpg_image.data_sz = data_sz;
+    result->new_jpg_image.capacity = data_sz;
+   
+    //if (parse_result.has_exif) {
+    //    result->new_jpg_image.data = malloc(data_sz);
+    //    if (!result->new_jpg_image.data) {
+    //        std::cerr << "内存分配失败: " << data_sz << " 字节" << std::endl;
+    //        return false;
+    //    }
+    //    memcpy(result->new_jpg_image.data, source_image->data, data_sz);
+    //    result->new_jpg_image.data_sz = data_sz;
+    //    result->new_jpg_image.capacity = data_sz;
+    //}
+    //else {
+    //    // 没有EXIF，直接复制原数据
+    //    result->new_jpg_image.data = malloc(data_sz);
+    //    if (!result->new_jpg_image.data) {
+    //        std::cerr << "内存分配失败: " << data_sz << " 字节" << std::endl;
+    //        return false;
+    //    }
+    //    memcpy(result->new_jpg_image.data, source_image->data, data_sz);
+    //    result->new_jpg_image.data_sz = data_sz;
+    //    result->new_jpg_image.capacity = data_sz;
+    //}
+
+    // 复制元数据
+    result->new_jpg_image.cg = source_image->cg;
+    result->new_jpg_image.ct = source_image->ct;
+    result->new_jpg_image.range = source_image->range;
+
+    return true;
+}
+
+std::string jpegR::generateXmpForSecondaryImage(uhdr_gainmap_metadata_ext_t& metadata) {
+    const vector<string> kConDirSeq({ kConDirectory, string("rdf:Seq") });
+
+    std::stringstream ss;
+    photos_editing_formats::image_io::XmlWriter writer(ss);
+    writer.StartWritingElement("x:xmpmeta");
+    writer.WriteXmlns("x", "adobe:ns:meta/");
+    writer.WriteAttributeNameAndValue("x:xmptk", "Adobe XMP Core 5.1.2");
+    writer.StartWritingElement("rdf:RDF");
+    writer.WriteXmlns("rdf", "http://www.w3.org/1999/02/22-rdf-syntax-ns#");
+    writer.StartWritingElement("rdf:Description");
+    writer.WriteXmlns(kGainMapPrefix, kGainMapUri);
+    writer.WriteAttributeNameAndValue(kMapVersion, metadata.version);
+    writer.WriteAttributeNameAndValue(kMapGainMapMin, log2(metadata.min_content_boost[0]));
+    writer.WriteAttributeNameAndValue(kMapGainMapMax, log2(metadata.max_content_boost[0]));
+    writer.WriteAttributeNameAndValue(kMapGamma, metadata.gamma[0]);
+    writer.WriteAttributeNameAndValue(kMapOffsetSdr, metadata.offset_sdr[0]);
+    writer.WriteAttributeNameAndValue(kMapOffsetHdr, metadata.offset_hdr[0]);
+    writer.WriteAttributeNameAndValue(kMapHDRCapacityMin, log2(metadata.hdr_capacity_min));
+    writer.WriteAttributeNameAndValue(kMapHDRCapacityMax, log2(metadata.hdr_capacity_max));
+    writer.WriteAttributeNameAndValue(kMapBaseRenditionIsHDR, "False");
+    writer.FinishWriting();
+
+    return ss.str();
+}
+
+
+uhdr_error_info_t jpegR::encodeGainmapMetadata(
+    const uhdr_gainmap_metadata_frac* in_metadata, std::vector<uint8_t>& out_data) {
+    if (in_metadata == nullptr) {
+        uhdr_error_info_t status;
+        status.error_code = UHDR_CODEC_INVALID_PARAM;
+        status.has_detail = 1;
+        snprintf(status.detail, sizeof status.detail,
+            "received nullptr for gain map metadata descriptor");
+        return status;
+    }
+
+    const uint16_t min_version = 0, writer_version = 0;
+    streamWriteU16(out_data, min_version);
+    streamWriteU16(out_data, writer_version);
+
+    uint8_t flags = 0u;
+    // Always write three channels for now for simplicity.
+    // TODO(maryla): the draft says that this specifies the count of channels of the
+    // gain map. But tone mapping is done in RGB space so there are always three
+    // channels, even if the gain map is grayscale. Should this be revised?
+    const uint8_t channelCount = in_metadata->allChannelsIdentical() ? 1u : 3u;
+
+    if (channelCount == 3) {
+        flags |= kIsMultiChannelMask;
+    }
+    if (in_metadata->useBaseColorSpace) {
+        flags |= kUseBaseColorSpaceMask;
+    }
+    if (in_metadata->backwardDirection) {
+        flags |= 4;
+    }
+
+    const uint32_t denom = in_metadata->baseHdrHeadroomD;
+    bool useCommonDenominator = true;
+    if (in_metadata->baseHdrHeadroomD != denom || in_metadata->alternateHdrHeadroomD != denom) {
+        useCommonDenominator = false;
+    }
+    for (int c = 0; c < channelCount; ++c) {
+        if (in_metadata->gainMapMinD[c] != denom || in_metadata->gainMapMaxD[c] != denom ||
+            in_metadata->gainMapGammaD[c] != denom || in_metadata->baseOffsetD[c] != denom ||
+            in_metadata->alternateOffsetD[c] != denom) {
+            useCommonDenominator = false;
+        }
+    }
+    if (useCommonDenominator) {
+        flags |= 8;
+    }
+    streamWriteU8(out_data, flags);
+
+    if (useCommonDenominator) {
+        streamWriteU32(out_data, denom);
+        streamWriteU32(out_data, in_metadata->baseHdrHeadroomN);
+        streamWriteU32(out_data, in_metadata->alternateHdrHeadroomN);
+        for (int c = 0; c < channelCount; ++c) {
+            streamWriteS32(out_data, in_metadata->gainMapMinN[c]);
+            streamWriteS32(out_data, in_metadata->gainMapMaxN[c]);
+            streamWriteU32(out_data, in_metadata->gainMapGammaN[c]);
+            streamWriteS32(out_data, in_metadata->baseOffsetN[c]);
+            streamWriteS32(out_data, in_metadata->alternateOffsetN[c]);
+        }
+    }
+    else {
+        streamWriteU32(out_data, in_metadata->baseHdrHeadroomN);
+        streamWriteU32(out_data, in_metadata->baseHdrHeadroomD);
+        streamWriteU32(out_data, in_metadata->alternateHdrHeadroomN);
+        streamWriteU32(out_data, in_metadata->alternateHdrHeadroomD);
+        for (int c = 0; c < channelCount; ++c) {
+            streamWriteS32(out_data, in_metadata->gainMapMinN[c]);
+            streamWriteU32(out_data, in_metadata->gainMapMinD[c]);
+            streamWriteS32(out_data, in_metadata->gainMapMaxN[c]);
+            streamWriteU32(out_data, in_metadata->gainMapMaxD[c]);
+            streamWriteU32(out_data, in_metadata->gainMapGammaN[c]);
+            streamWriteU32(out_data, in_metadata->gainMapGammaD[c]);
+            streamWriteS32(out_data, in_metadata->baseOffsetN[c]);
+            streamWriteU32(out_data, in_metadata->baseOffsetD[c]);
+            streamWriteS32(out_data, in_metadata->alternateOffsetN[c]);
+            streamWriteU32(out_data, in_metadata->alternateOffsetD[c]);
+        }
+    }
+
+    return g_no_error;
+}
+
+jpegR::uhdr_error_info_t jpegR::gainmapMetadataFloatToFraction(
+    const jpegR::uhdr_gainmap_metadata_ext_t* from, jpegR::uhdr_gainmap_metadata_frac* to) {
+    if (from == nullptr || to == nullptr) {
+        jpegR::uhdr_error_info_t status;
+        status.error_code = UHDR_CODEC_INVALID_PARAM;
+        status.has_detail = 1;
+        snprintf(status.detail, sizeof status.detail,
+            "received nullptr for gain map metadata descriptor");
+        return status;
+    }
+
+    to->backwardDirection = false;
+    to->useBaseColorSpace = from->use_base_cg;
+
+#define CONVERT_FLT_TO_UNSIGNED_FRACTION(flt, numerator, denominator)                          \
+  if (!floatToUnsignedFraction(flt, numerator, denominator)) {                                 \
+    uhdr_error_info_t status;                                                                  \
+    status.error_code = UHDR_CODEC_INVALID_PARAM;                                              \
+    status.has_detail = 1;                                                                     \
+    snprintf(status.detail, sizeof status.detail,                                              \
+             "encountered error while representing float %f as a rational number (p/q form) ", \
+             flt);                                                                             \
+    return status;                                                                             \
+  }
+
+#define CONVERT_FLT_TO_SIGNED_FRACTION(flt, numerator, denominator)                            \
+  if (!floatToSignedFraction(flt, numerator, denominator)) {                                   \
+    uhdr_error_info_t status;                                                                  \
+    status.error_code = UHDR_CODEC_INVALID_PARAM;                                              \
+    status.has_detail = 1;                                                                     \
+    snprintf(status.detail, sizeof status.detail,                                              \
+             "encountered error while representing float %f as a rational number (p/q form) ", \
+             flt);                                                                             \
+    return status;                                                                             \
+  }
+
+
+    bool isSingleChannel = from->are_all_channels_identical();
+    for (int i = 0; i < (isSingleChannel ? 1 : 3); i++) {
+        CONVERT_FLT_TO_SIGNED_FRACTION(log2(from->max_content_boost[i]), &to->gainMapMaxN[i],
+            &to->gainMapMaxD[i])
+
+            CONVERT_FLT_TO_SIGNED_FRACTION(log2(from->min_content_boost[i]), &to->gainMapMinN[i],
+                &to->gainMapMinD[i]);
+
+        CONVERT_FLT_TO_UNSIGNED_FRACTION(from->gamma[i], &to->gainMapGammaN[i], &to->gainMapGammaD[i]);
+
+        CONVERT_FLT_TO_SIGNED_FRACTION(from->offset_sdr[i], &to->baseOffsetN[i], &to->baseOffsetD[i]);
+
+        CONVERT_FLT_TO_SIGNED_FRACTION(from->offset_hdr[i], &to->alternateOffsetN[i],
+            &to->alternateOffsetD[i]);
+    }
+
+    if (isSingleChannel) {
+        to->gainMapMaxN[2] = to->gainMapMaxN[1] = to->gainMapMaxN[0];
+        to->gainMapMaxD[2] = to->gainMapMaxD[1] = to->gainMapMaxD[0];
+
+        to->gainMapMinN[2] = to->gainMapMinN[1] = to->gainMapMinN[0];
+        to->gainMapMinD[2] = to->gainMapMinD[1] = to->gainMapMinD[0];
+
+        to->gainMapGammaN[2] = to->gainMapGammaN[1] = to->gainMapGammaN[0];
+        to->gainMapGammaD[2] = to->gainMapGammaD[1] = to->gainMapGammaD[0];
+
+        to->baseOffsetN[2] = to->baseOffsetN[1] = to->baseOffsetN[0];
+        to->baseOffsetD[2] = to->baseOffsetD[1] = to->baseOffsetD[0];
+
+        to->alternateOffsetN[2] = to->alternateOffsetN[1] = to->alternateOffsetN[0];
+        to->alternateOffsetD[2] = to->alternateOffsetD[1] = to->alternateOffsetD[0];
+    }
+
+    CONVERT_FLT_TO_UNSIGNED_FRACTION(log2(from->hdr_capacity_min), &to->baseHdrHeadroomN,
+        &to->baseHdrHeadroomD);
+
+    CONVERT_FLT_TO_UNSIGNED_FRACTION(log2(from->hdr_capacity_max), &to->alternateHdrHeadroomN,
+        &to->alternateHdrHeadroomD);
+
+    return g_no_error;
+}
+
+bool jpegR::floatToSignedFraction(float v, int32_t* numerator, uint32_t* denominator) {
+    uint32_t positive_numerator;
+    if (!floatToUnsignedFractionImpl(fabs(v), INT32_MAX, &positive_numerator, denominator)) {
+        return false;
+    }
+    *numerator = (int32_t)positive_numerator;
+    if (v < 0) {
+        *numerator *= -1;
+    }
+    return true;
+}
+
+static bool jpegR::floatToUnsignedFractionImpl(float v, uint32_t maxNumerator, uint32_t* numerator,
+    uint32_t* denominator) {
+    if (std::isnan(v) || v < 0 || v > maxNumerator) {
+        return false;
+    }
+
+    // Maximum denominator: makes sure that the numerator is <= maxNumerator and the denominator
+    // is <= UINT32_MAX.
+    const uint64_t maxD = (v <= 1) ? UINT32_MAX : (uint64_t)floor(maxNumerator / v);
+
+    // Find the best approximation of v as a fraction using continued fractions, see
+    // https://en.wikipedia.org/wiki/Continued_fraction
+    *denominator = 1;
+    uint32_t previousD = 0;
+    double currentV = (double)v - floor(v);
+    int iter = 0;
+    // Set a maximum number of iterations to be safe. Most numbers should
+    // converge in less than ~20 iterations.
+    // The golden ratio is the worst case and takes 39 iterations.
+    const int maxIter = 39;
+    while (iter < maxIter) {
+        const double numeratorDouble = (double)(*denominator) * v;
+        if (numeratorDouble > maxNumerator) {
+            return false;
+        }
+        *numerator = (uint32_t)round(numeratorDouble);
+        if (fabs(numeratorDouble - (*numerator)) == 0.0) {
+            return true;
+        }
+        currentV = 1.0 / currentV;
+        const double newD = previousD + floor(currentV) * (*denominator);
+        if (newD > maxD) {
+            // This is the best we can do with a denominator <= max_d.
+            return true;
+        }
+        previousD = *denominator;
+        if (newD > (double)UINT32_MAX) {
+            return false;
+        }
+        *denominator = (uint32_t)newD;
+        currentV -= floor(currentV);
+        ++iter;
+    }
+    // Maximum number of iterations reached, return what we've found.
+    // For max_iter >= 39 we shouldn't get here. max_iter can be set
+    // to a lower value to speed up the algorithm if needed.
+    *numerator = (uint32_t)round((double)(*denominator) * v);
+    return true;
+}
+
+bool jpegR::floatToUnsignedFraction(float v, uint32_t* numerator, uint32_t* denominator) {
+    return floatToUnsignedFractionImpl(v, UINT32_MAX, numerator, denominator);
+}
+
+uhdr_error_info_t jpegR::Write(uhdr_compressed_image_t* destination, const void* source, size_t length,
+    size_t& position) {
+    if (position + length > destination->capacity) {
+        uhdr_error_info_t status;
+        status.error_code = UHDR_CODEC_MEM_ERROR;
+        status.has_detail = 1;
+        snprintf(status.detail, sizeof status.detail,
+            "output buffer to store compressed data is too small: write position: %zd, size: %zd, "
+            "capacity: %zd",
+            position, length, destination->capacity);
+        return status;
+    }
+
+    memcpy((uint8_t*)destination->data + sizeof(uint8_t) * position, source, length);
+    position += length;
+    return g_no_error;
+}
+
+DataStruct::DataStruct(size_t s) {
+    data = malloc(s);
+    length = s;
+    memset(data, 0, s);
+    writePos = 0;
+}
+
+DataStruct::~DataStruct() {
+    if (data != nullptr) {
+        free(data);
+    }
+}
+
+void* DataStruct::getData() { return data; }
+
+size_t DataStruct::getLength() { return length; }
+
+size_t DataStruct::getBytesWritten() { return writePos; }
+
+bool DataStruct::write8(uint8_t value) {
+    uint8_t v = value;
+    return write(&v, 1);
+}
+
+bool DataStruct::write16(uint16_t value) {
+    uint16_t v = value;
+    return write(&v, 2);
+}
+
+bool DataStruct::write32(uint32_t value) {
+    uint32_t v = value;
+    return write(&v, 4);
+}
+
+bool jpegR::DataStruct::write(const void* src, size_t size) {
+    if (writePos + size > length) {
+        ALOGE("Writing out of boundary: write position: %zd, size: %zd, capacity: %zd", writePos, size,
+            length);
+        return false;
+    }
+    memcpy((uint8_t*)data + writePos, src, size);
+    writePos += size;
+    return true;
+}
+
+namespace photos_editing_formats {
+    namespace image_io {
+
+        using std::ostream;
+        using std::string;
+        using std::vector;
+
+        namespace {
+
+            const char kXmlnsColon[] = "xmlns:";
+
+        }  // namespace
+
+        XmlWriter::XmlWriter(std::ostream& os)
+            : os_(os), element_count_(0), quote_mark_('"') {
+        }
+
+        void XmlWriter::WriteXmlns(const string& prefix, const string& uri) {
+            string name = string(kXmlnsColon) + prefix;
+            WriteAttributeNameAndValue(name, uri, true);
+        }
+
+        size_t XmlWriter::StartWritingElement(const string& element_name) {
+            MaybeWriteCloseBracket(true);
+            size_t current_depth = element_data_.size();
+            if (current_depth > 0) {
+                element_data_.back().has_children = true;
+            }
+            element_data_.emplace_back(element_name);
+            os_ << indent_ << "<" << element_name;
+            indent_ += "  ";
+            element_count_ += 1;
+            return current_depth;
+        }
+
+        void XmlWriter::FinishWritingElement() {
+            if (!element_data_.empty()) {
+                if (indent_.size() >= 2) {
+                    indent_.resize(indent_.size() - 2);
+                }
+                auto& data = element_data_.back();
+                if (!data.has_content && !data.has_children) {
+                    if (!data.has_attributes || data.has_children) {
+                        os_ << indent_;
+                    }
+                    os_ << "/>" << std::endl;
+                }
+                else {
+                    if (!data.has_content) {
+                        os_ << indent_;
+                    }
+                    os_ << "</" << data.name << ">" << std::endl;
+                }
+                element_data_.pop_back();
+            }
+        }
+
+        void XmlWriter::FinishWritingElementsToDepth(size_t depth) {
+            if (!element_data_.empty()) {
+                for (size_t index = element_data_.size(); index > depth; --index) {
+                    FinishWritingElement();
+                }
+            }
+        }
+
+        size_t XmlWriter::StartWritingElements(const vector<string>& element_names) {
+            size_t current_depth = element_data_.size();
+            for (const auto& element_name : element_names) {
+                StartWritingElement(element_name);
+            }
+            return current_depth;
+        }
+
+        void XmlWriter::WriteElementAndContent(const string& element_name,
+            const string& content) {
+            StartWritingElement(element_name);
+            WriteContent(content);
+            FinishWritingElement();
+        }
+
+        void XmlWriter::WriteContent(const string& content) {
+            MaybeWriteCloseBracket(false);
+            if (!element_data_.empty()) {
+                auto& data = element_data_.back();
+                data.has_content = true;
+                os_ << content;
+            }
+        }
+
+        void XmlWriter::WriteAttributeNameAndValue(const string& name,
+            const string& value,
+            bool add_quote_marks) {
+            WriteAttributeName(name);
+            WriteAttributeValue(add_quote_marks, value, add_quote_marks);
+        }
+
+        void XmlWriter::WriteAttributeName(const string& name) {
+            if (!element_data_.empty()) {
+                os_ << std::endl << indent_ << name << "=";
+                element_data_.back().has_attributes = true;
+            }
+        }
+
+        void XmlWriter::WriteAttributeValue(bool add_leading_quote_mark,
+            const string& value,
+            bool add_trailing_quote_mark) {
+            if (!element_data_.empty()) {
+                if (add_leading_quote_mark) os_ << quote_mark_;
+                os_ << value;
+                if (add_trailing_quote_mark) os_ << quote_mark_;
+            }
+        }
+
+        void XmlWriter::WriteComment(const std::string& comment) {
+            MaybeWriteCloseBracket(true);
+            os_ << indent_ << "<!-- " << comment << " -->" << std::endl;
+            if (!element_data_.empty()) {
+                auto& data = element_data_.back();
+                data.has_children = true;
+            }
+        }
+
+        bool XmlWriter::MaybeWriteCloseBracket(bool with_trailing_newline) {
+            if (!element_data_.empty()) {
+                auto& data = element_data_.back();
+                if (!data.has_content && !data.has_children) {
+                    os_ << ">";
+                    if (with_trailing_newline) {
+                        os_ << std::endl;
+                    }
+                    return true;
+                }
+            }
+            return false;
+        }
+
+    }  // namespace image_io
+}  // namespace photos_editing_formats

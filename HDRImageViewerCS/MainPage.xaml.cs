@@ -810,7 +810,8 @@ namespace HDRImageViewerCS
             }
             else
             {
-                renderer.ExportImageToSdr(ras, wicFormat);
+                renderer.ExportImageToISOJpeg(ras);
+                //renderer.ExportImageToSdr(ras, wicFormat);
             }
         }
 
@@ -909,6 +910,7 @@ namespace HDRImageViewerCS
             {
                 picker.FileTypeChoices.Add(format);
             }
+
 
             var pickedFile = await picker.PickSaveFileAsync();
             if (pickedFile != null)
