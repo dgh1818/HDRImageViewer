@@ -24,15 +24,16 @@
 <br />
 
 ## About the Project
+* 支持华为老的私有HDR标准的照片gainmap位于APP5中，而ISO ULTRA HDR位于APP2中
 * 支持华为老的私有HDR标准的照片查看（任何设备包括并早于麒麟9000s的设备使用老的私有HDR照片格式，包括运行于Harmonyos Next设备上的9000s设备）
 * 支持了gainmap file转jxr文件的导出
-* 支持了私有格式转换到ISO HDR的功能
-* 需要取得windows安全中心文件系统权限授权
+* 支持了私有格式转换到ISO HDR的功能（选择保存为jpg即可）
+* 需要取得windows安全中心文件系统权限授权才能切换照片
 * This software support HUAWEI HarmonyOS the old CUVA standard HDR photo
 * Support jepg gainmap file to jxr
-* Need to request file access in the windows setting.
+* Need to request file access in the windows setting to switch poto.
 
-Any device before(include) kirin9000s use the old CUVA standard HDR photo.(Which is not compatible with ISO standard)
+Any device before(include) Kirin9000s use the old CUVA standard HDR photo.(Which is not compatible with ISO standard)
 
 ## Todo
 * 批量实现CUVA到ISO HDR的转换
