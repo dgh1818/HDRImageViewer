@@ -507,36 +507,81 @@ namespace HDRImageViewerCS
             }
         }
 
+        // Allowed image extensions (lowercase)
+        private static readonly HashSet<string> _allowedImageExtensions = new HashSet<string>
+{
+    ".jpg", ".jpeg", ".heic", ".heif"
+};
+
+        // Helper: search from startIndex in direction (+1 or -1) for the first allowed image index; return -1 if not found
+        private int FindNextImageIndex(int startIndex, int direction)
+        {
+            int idx = startIndex;
+            while (idx >= 0 && idx < _fileList.Count)
+            {
+                var file = _fileList[idx];
+                string ext = file?.FileType?.ToLowerInvariant() ?? "";
+                if (_allowedImageExtensions.Contains(ext))
+                    return idx;
+                idx += direction;
+            }
+            return -1;
+        }
+
         private async void PrevImageButton_Click(object sender, RoutedEventArgs e)
         {
             if (_fileList.Count == 0 || _currentIndex <= 0)
             {
-                Debug.WriteLine("无法向前导航：已在第一张图片");
+                Debug.WriteLine("Cannot navigate backward: already at the first image or the list is empty.");
                 return;
             }
 
-            int newIndex = _currentIndex - 1;
-            Debug.WriteLine($"向前导航: {_currentIndex} -> {newIndex}");
+            int foundIndex = FindNextImageIndex(_currentIndex - 1, -1);
+            if (foundIndex == -1)
+            {
+                Debug.WriteLine("No previous supported image found.");
+                return;
+            }
 
-            // 直接从文件列表中获取 StorageFile 对象
-            StorageFile file = _fileList[newIndex];
-            await LoadImageAsync(file);
+            Debug.WriteLine($"Navigating backward: {_currentIndex} -> {foundIndex} (supported image)");
+            var file = _fileList[foundIndex];
+            try
+            {
+                await LoadImageAsync(file);
+                _currentIndex = foundIndex; // update only on successful load
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Failed to load image: {ex}");
+            }
         }
 
         private async void NextImageButton_Click(object sender, RoutedEventArgs e)
         {
             if (_fileList.Count == 0 || _currentIndex >= _fileList.Count - 1)
             {
-                Debug.WriteLine("无法向后导航：已在最后一张图片");
+                Debug.WriteLine("Cannot navigate forward: already at the last image or the list is empty.");
                 return;
             }
 
-            int newIndex = _currentIndex + 1;
-            Debug.WriteLine($"向后导航: {_currentIndex} -> {newIndex}");
+            int foundIndex = FindNextImageIndex(_currentIndex + 1, +1);
+            if (foundIndex == -1)
+            {
+                Debug.WriteLine("No next supported image found.");
+                return;
+            }
 
-            // 直接从文件列表中获取 StorageFile 对象
-            StorageFile file = _fileList[newIndex];
-            await LoadImageAsync(file);
+            Debug.WriteLine($"Navigating forward: {_currentIndex} -> {foundIndex} (supported image)");
+            var file = _fileList[foundIndex];
+            try
+            {
+                await LoadImageAsync(file);
+                _currentIndex = foundIndex; // update only on successful load
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Failed to load image: {ex}");
+            }
         }
 
         private void PrevImageInvoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
