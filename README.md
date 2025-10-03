@@ -24,21 +24,32 @@
 <br />
 
 ## About the Project
-* 支持华为老的私有HDR标准的照片gainmap位于APP5中，而ISO ULTRA HDR位于APP2中
 * 支持华为老的私有HDR标准的照片查看（任何设备包括并早于麒麟9000s的设备使用老的私有HDR照片格式，包括运行于Harmonyos Next设备上的9000s设备）
+* 支持华为拍摄的ISO HDR gainmap Jpeg的照片的查看（通常也可以叫做Ultra Hdr或者UHDR)
+* 华为老的私有HDR标准的照片gainmap位于APP5中，而ISO ULTRA HDR位于APP2中
 * 支持了gainmap file转jxr文件的导出
 * 支持了私有格式转换到ISO HDR的功能（选择保存为jpg即可）
 * 需要取得windows安全中心文件系统权限授权才能切换照片
+  
 * This software support HUAWEI HarmonyOS the old CUVA standard HDR photo
-* Support jepg gainmap file to jxr
+* This software support ISO gainmap HDR Jpeg (also called Ultra Hdr/UHDR) shot by Huawei's HarmonyOS device
+* Support jpeg gainmap jpeg file to jxr
+* Support convert old Cuva standard HDR jpeg to ISO jpeg
 * Need to request file access in the windows setting to switch poto.
+
+  <img width="2885" height="1592" alt="屏幕截图 2025-10-03 165604" src="https://github.com/user-attachments/assets/f930787d-c6b7-442d-8448-66a7d8732437" />
+
 
 Any device before(include) Kirin9000s use the old CUVA standard HDR photo.(Which is not compatible with ISO standard)
 
 ## Todo
 * 批量实现CUVA到ISO HDR的转换
-* 支持ISO HDR jpeg的查看
+* 支持其他设备拍摄的ISO HDR gainmap jpeg
+* 支持heic文件
 
+* convert CUVA to ISO in batch
+* support HDR gainmap Jpeg shot by other brand device
+* support HDR gainmap heic file
 
 Oringinal:
 ## About the Project
