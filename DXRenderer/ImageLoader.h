@@ -174,7 +174,7 @@ namespace DXRenderer
         bool TryLoadAppleHdrGainMapHeic(_In_ IStream* imageStream);
         bool TryLoadAppleHdrGainMapJpegMpo(_In_ IStream* imageStream, _In_ IWICBitmapFrameDecode* frame);
 
-        bool TryLoadCuvaHdrGainMapJpegMpo(_In_ IStream* imageStream, _In_ IWICBitmapFrameDecode* frame);
+        int TryLoadCuvaHdrGainMapJpegMpo(_In_ IStream* imageStream, _In_ IWICBitmapFrameDecode* frame);
         void CreateCpuMergedBitmap();
         uint16_t FloatToHalf(float value);
         float sRGBToLinear(float color);

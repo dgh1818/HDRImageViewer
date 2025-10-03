@@ -141,8 +141,15 @@ void ImageLoader::LoadImageFromWicInt(_In_ IStream* imageStream)
     }
     else if (fmt == GUID_ContainerFormatJpeg)
     {
-        m_imageInfo.hasCuvaHdrGainMap = TryLoadCuvaHdrGainMapJpegMpo(imageStream, frame.Get());
-        m_imageInfo.hasAppleHdrGainMap = m_imageInfo.hasCuvaHdrGainMap;
+        int gainmapType = TryLoadCuvaHdrGainMapJpegMpo(imageStream, frame.Get());
+        if (gainmapType == 1) {
+            m_imageInfo.hasCuvaHdrGainMap = true;
+        }
+        else if (gainmapType == 2) {
+            m_imageInfo.hasIsoJpegHdrGainMap = true;
+        }
+        
+        m_imageInfo.hasAppleHdrGainMap = gainmapType;
         if(!m_imageInfo.hasAppleHdrGainMap) {
             m_imageInfo.hasAppleHdrGainMap = TryLoadAppleHdrGainMapJpegMpo(imageStream, frame.Get());
         }
@@ -584,7 +591,7 @@ bool ImageLoader::TryLoadAppleHdrGainMapHeic(IStream* imageStream)
 /// <param name="imageStream">Underlying stream is needed since we have to manually setup WIC to read the second Individual Image.</param>
 /// <param name="frame"></param>
 /// <returns></returns>
-bool ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapFrameDecode* frame)
+int ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapFrameDecode* frame)
 {
     
     auto fact = m_deviceResources->GetWicImagingFactory();
@@ -601,12 +608,6 @@ bool ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapF
     IFRF(frame->GetMetadataQueryReader(&query));
     IFRF(query->GetMetadataByName(L"/app1/ifd/{ushort=270}", &propvarTitle));
     IFRF(query->GetMetadataByName(L"/app1/ifd/{ushort=271}", &cuvaMftr));
-
-    if (cuvaMftr.vt != VT_LPSTR) return false;
-    if (strcmp("HUAWEI", cuvaMftr.pszVal) != 0) return false;
-
-    if (propvarTitle.vt != VT_LPSTR) return false;
-    if (strcmp("_cuva", propvarTitle.pszVal) != 0) return false;
 
     LARGE_INTEGER zero = {};
     imageStream->Seek(zero, STREAM_SEEK_SET, nullptr);
@@ -638,6 +639,8 @@ bool ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapF
     size_t exif_pos = -1;
     exif_result.has_exif = false;
     exif_result.exif_ptr = nullptr;
+
+    int gainmapType = 0;
 
     for (int i = 0; i < len - 10; ++i)
     {
@@ -686,15 +689,38 @@ bool ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapF
         }
     }
 
+
     for (int i = firstStart; i < len - 3; ++i)
     {
         if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD8 &&
-            jpegData[i + 2] == 0xFF && jpegData[i + 3] == 0xE5)
+            jpegData[i + 2] == 0xFF && jpegData[i + 3] == 0xE2)
         {
             mainImageEnd = i - 3;
             firstEnd = i - 1;
             secondStart = i;
+            gainmapType = 2;
             break;
+        }
+    }
+
+    if (secondStart == -1) {
+        if (cuvaMftr.vt != VT_LPSTR) return false;
+        if (strcmp("HUAWEI", cuvaMftr.pszVal) != 0) return 0;
+
+        if (propvarTitle.vt != VT_LPSTR) return false;
+        if (strcmp("_cuva", propvarTitle.pszVal) != 0) return 0;
+
+        for (int i = firstStart; i < len - 3; ++i)
+        {
+            if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD8 &&
+                jpegData[i + 2] == 0xFF && jpegData[i + 3] == 0xE5)
+            {
+                mainImageEnd = i - 3;
+                firstEnd = i - 1;
+                secondStart = i;
+                gainmapType = 1;
+                break;
+            }
         }
     }
 
@@ -706,6 +732,11 @@ bool ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapF
             break;
         }
     }
+
+    if (secondStart == -1 || secondEnd == -1) {
+        return 0;
+    }
+
     sdrSize = firstEnd - firstStart + 1;
     gainSize = secondEnd - secondStart + 1;
 
@@ -768,7 +799,7 @@ bool ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapF
     IFRF(fmt.As(&m_appleHdrGainMap.wicSource));
 
 
-    return true;
+    return gainmapType;
 }
 
 bool ImageLoader::TryLoadAppleHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapFrameDecode* frame)

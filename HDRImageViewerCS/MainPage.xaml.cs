@@ -813,7 +813,7 @@ namespace HDRImageViewerCS
             }
             else
             {
-                if(imageInfo.hasCuvaHdrGainMap)
+                if(imageInfo.hasCuvaHdrGainMap || imageInfo.hasIsoJpegHdrGainMap)
                 {
                     renderer.ExportImageToISOJpeg(ras);
                 }

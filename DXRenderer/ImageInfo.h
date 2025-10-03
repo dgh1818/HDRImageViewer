@@ -19,6 +19,7 @@ namespace DXRenderer
         bool                                            hasEXRChromaticitiesInfo;
 
         bool                                            hasCuvaHdrGainMap;
+        bool                                            hasIsoJpegHdrGainMap;
     };
 
     public value struct ImageCLL
