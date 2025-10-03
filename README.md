@@ -51,7 +51,7 @@ Any device before(include) Kirin9000s use the old CUVA standard HDR photo.(Which
 * support HDR gainmap Jpeg shot by other brand device
 * support HDR gainmap heic file
 
-Oringinal:
+Original:
 ## About the Project
 This is a Universal Windows Platform (UWP) app that uses [DirectX Advanced Color](https://aka.ms/directxhdr) to decode and render HDR image formats at the best available quality on a supported HDR10 display.
 
