@@ -8,6 +8,9 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
     Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"
+    AllowDrop="True"
+    DragOver="Page_DragOver"
+    Drop="Page_Drop"
     >
     <!-- Keyboard accelerators -->
     <Page.KeyboardAccelerators>
@@ -212,7 +215,8 @@
             <TextBlock Style="{StaticResource InfoLine}" x:Name="ImageHasProfile">Color profile:</TextBlock>
             <TextBlock Style="{StaticResource InfoLine}" x:Name="ImageBitDepth">Bit depth:</TextBlock>
             <TextBlock Style="{StaticResource InfoLine}" x:Name="ImageIsFloat">Floating point:</TextBlock>
-            <TextBlock Style="{StaticResource InfoLine}" x:Name="ImageMaxCLL">Estimated MaxCLL:</TextBlock>
+            <TextBlock Style="{StaticResource InfoLine}" x:Name="ImageGainmapType">Gainmap type:</TextBlock>
+            <TextBlock Style="{StaticResource InfoLine}" x:Name="ImageMaxCLL">Estimated MaxCLL (ref 203 nits):</TextBlock>
             <TextBlock Style="{StaticResource InfoLine}" x:Name="ImageMedianCLL" Visibility="Collapsed">Estimated MedCLL:</TextBlock>
             <MenuFlyoutSeparator />
             <TextBlock Style="{StaticResource SectionTitle}">Display information</TextBlock>

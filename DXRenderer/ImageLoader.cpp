@@ -141,16 +141,34 @@ void ImageLoader::LoadImageFromWicInt(_In_ IStream* imageStream)
     }
     else if (fmt == GUID_ContainerFormatJpeg)
     {
-        int gainmapType = TryLoadCuvaHdrGainMapJpegMpo(imageStream, frame.Get());
-        if (gainmapType == 1) {
-            m_imageInfo.hasCuvaHdrGainMap = true;
+        m_imageInfo.hasCuvaHdrGainMap = false;
+        m_imageInfo.hasHuaweiIsoJpegHdrGainMap = false;
+        m_imageInfo.hasIsoJpegHdrGainMap = false;
+
+        int gainmapType = 0;
+        if (TryLoadIsoHdrGainMapJpegMpo(imageStream, frame.Get()))
+        {
+            gainmapType = 3;
         }
-        else if (gainmapType == 2) {
-            m_imageInfo.hasIsoJpegHdrGainMap = true;
+        else
+        {
+            gainmapType = TryLoadCuvaHdrGainMapJpegMpo(imageStream, frame.Get());
         }
-        
-        m_imageInfo.hasAppleHdrGainMap = gainmapType;
-        if(!m_imageInfo.hasAppleHdrGainMap) {
+
+        {
+            wchar_t buf[64] = {};
+            swprintf(buf, ARRAYSIZE(buf), L"gainmapType = %d\n", gainmapType);
+            OutputDebugString(buf);
+        }
+        std::cout << "gainmapType = " << gainmapType << std::endl;
+
+        m_imageInfo.hasCuvaHdrGainMap = gainmapType == 1;
+        m_imageInfo.hasHuaweiIsoJpegHdrGainMap = gainmapType == 2;
+        m_imageInfo.hasIsoJpegHdrGainMap = gainmapType == 3;
+
+        m_imageInfo.hasAppleHdrGainMap = gainmapType != 0;
+        if (!m_imageInfo.hasAppleHdrGainMap) {
+            gainmapType = 4;
             m_imageInfo.hasAppleHdrGainMap = TryLoadAppleHdrGainMapJpegMpo(imageStream, frame.Get());
         }
         
@@ -802,6 +820,325 @@ int ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapFr
     return gainmapType;
 }
 
+bool ImageLoader::TryLoadIsoHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapFrameDecode* frame)
+{
+    UNREFERENCED_PARAMETER(frame);
+
+    auto fact = m_deviceResources->GetWicImagingFactory();
+    STATSTG stats = {};
+    IFRF(imageStream->Stat(&stats, STATFLAG_NONAME));
+
+    if (stats.cbSize.QuadPart <= 4) return false;
+
+    LARGE_INTEGER zero = {};
+    imageStream->Seek(zero, STREAM_SEEK_SET, nullptr);
+
+    jpegData.clear();
+    jpegData.resize(static_cast<size_t>(stats.cbSize.QuadPart));
+    ULONG read = 0;
+    IFRF(imageStream->Read(jpegData.data(), static_cast<ULONG>(jpegData.size()), &read));
+    if (read != jpegData.size()) return false;
+
+    const size_t len = jpegData.size();
+    const BYTE exif_signature[6] = { 0x45, 0x78, 0x69, 0x66, 0x00, 0x00 };
+
+    exif_result.has_exif = false;
+    exif_result.exif_ptr = nullptr;
+    exif_result.exif_size = 0;
+    exif_result.exif_pos = 0;
+
+    for (size_t i = 0; i + 10 < len; ++i)
+    {
+        if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xE1)
+        {
+            uint16_t segLen = static_cast<uint16_t>(jpegData[i + 2] << 8 | jpegData[i + 3]);
+            if (segLen < 2) continue;
+            size_t segStart = i + 4;
+            size_t segDataLen = segLen - 2;
+            if (segStart + segDataLen > len) continue;
+
+            if (segDataLen >= sizeof(exif_signature) &&
+                memcmp(&jpegData[segStart], exif_signature, sizeof(exif_signature)) == 0)
+            {
+                exif_result.exif_pos = segStart;
+                exif_result.exif_ptr = &jpegData[segStart];
+                exif_result.exif_size = segDataLen;
+                exif_result.has_exif = true;
+                break;
+            }
+        }
+    }
+
+    auto read16 = [&](size_t offset, bool bigEndian) -> uint16_t
+    {
+        if (bigEndian)
+        {
+            return static_cast<uint16_t>(jpegData[offset] << 8 | jpegData[offset + 1]);
+        }
+        return static_cast<uint16_t>(jpegData[offset] | (jpegData[offset + 1] << 8));
+    };
+
+    auto read32 = [&](size_t offset, bool bigEndian) -> uint32_t
+    {
+        if (bigEndian)
+        {
+            return static_cast<uint32_t>(jpegData[offset] << 24 |
+                jpegData[offset + 1] << 16 |
+                jpegData[offset + 2] << 8 |
+                jpegData[offset + 3]);
+        }
+        return static_cast<uint32_t>(jpegData[offset] |
+            (jpegData[offset + 1] << 8) |
+            (jpegData[offset + 2] << 16) |
+            (jpegData[offset + 3] << 24));
+    };
+
+    auto hasIsoApp2 = [&](size_t imageStart, size_t imageEnd) -> bool
+    {
+        static const char kIsoNamespace[] = "urn:iso:std:iso:ts:21496:-1";
+        const size_t namespaceLen = sizeof(kIsoNamespace);
+
+        if (imageEnd <= imageStart + 4) return false;
+        size_t pos = imageStart + 2;
+        const size_t end = imageEnd + 1;
+
+        while (pos + 4 <= end)
+        {
+            if (jpegData[pos] != 0xFF)
+            {
+                pos++;
+                continue;
+            }
+
+            BYTE marker = jpegData[pos + 1];
+            if (marker == 0xDA) break;
+            if (marker == 0xD8 || marker == 0xD9)
+            {
+                pos += 2;
+                continue;
+            }
+            if (marker == 0x00 || (marker >= 0xD0 && marker <= 0xD7))
+            {
+                pos += 2;
+                continue;
+            }
+            if (pos + 4 > end) break;
+
+            uint16_t segLen = static_cast<uint16_t>(jpegData[pos + 2] << 8 | jpegData[pos + 3]);
+            if (segLen < 2) break;
+
+            size_t segStart = pos + 4;
+            size_t segDataLen = segLen - 2;
+            if (segStart + segDataLen > end) break;
+
+            if (marker == 0xE2 && segDataLen >= namespaceLen &&
+                memcmp(jpegData.data() + segStart, kIsoNamespace, namespaceLen) == 0)
+            {
+                return true;
+            }
+
+            pos = segStart + segDataLen;
+        }
+
+        return false;
+    };
+
+    auto findSecondaryStartFromMpf = [&](size_t* outStart) -> bool
+    {
+        for (size_t i = 0; i + 10 < len; ++i)
+        {
+            if (jpegData[i] != 0xFF || jpegData[i + 1] != 0xE2) continue;
+
+            uint16_t segLen = static_cast<uint16_t>(jpegData[i + 2] << 8 | jpegData[i + 3]);
+            if (segLen < 2) return false;
+
+            size_t segStart = i + 4;
+            size_t segDataLen = segLen - 2;
+            size_t segEnd = segStart + segDataLen;
+            if (segEnd > len) return false;
+
+            if (segDataLen >= 4 && memcmp(jpegData.data() + segStart, "MPF\0", 4) == 0)
+            {
+                size_t tiffStart = segStart + 4;
+                if (tiffStart + 8 > segEnd) return false;
+
+                bool bigEndian = jpegData[tiffStart] == 0x4D && jpegData[tiffStart + 1] == 0x4D;
+                bool littleEndian = jpegData[tiffStart] == 0x49 && jpegData[tiffStart + 1] == 0x49;
+                if (!bigEndian && !littleEndian) return false;
+
+                uint32_t ifdOffset = read32(tiffStart + 4, bigEndian);
+                size_t ifdStart = tiffStart + ifdOffset;
+                if (ifdStart + 2 > segEnd) return false;
+
+                uint16_t entryCount = read16(ifdStart, bigEndian);
+                size_t entryPos = ifdStart + 2;
+                size_t entryBytes = static_cast<size_t>(entryCount) * 12;
+                if (entryPos + entryBytes > segEnd) return false;
+
+                uint32_t mpEntryOffset = 0;
+                uint32_t mpEntryCount = 0;
+                for (uint16_t e = 0; e < entryCount; ++e)
+                {
+                    size_t base = entryPos + static_cast<size_t>(e) * 12;
+                    uint16_t tag = read16(base, bigEndian);
+                    if (tag == 0xB002)
+                    {
+                        mpEntryCount = read32(base + 4, bigEndian);
+                        mpEntryOffset = read32(base + 8, bigEndian);
+                        break;
+                    }
+                }
+
+                if (mpEntryOffset == 0 || mpEntryCount < 32) return false;
+
+                size_t mpEntryStart = tiffStart + mpEntryOffset;
+                if (mpEntryStart + 32 > segEnd) return false;
+
+                size_t secondEntry = mpEntryStart + 16;
+                uint32_t secondOffset = read32(secondEntry + 8, bigEndian);
+                size_t candidate = tiffStart + secondOffset;
+                if (candidate + 1 >= len) return false;
+                if (jpegData[candidate] != 0xFF || jpegData[candidate + 1] != 0xD8) return false;
+
+                *outStart = candidate;
+                return true;
+            }
+
+            i = segEnd > 0 ? segEnd - 1 : i;
+        }
+
+        return false;
+    };
+
+    size_t firstSoi = 0;
+    bool foundSoi = false;
+    for (size_t i = 0; i + 1 < len; ++i)
+    {
+        if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD8)
+        {
+            firstSoi = i;
+            foundSoi = true;
+            break;
+        }
+    }
+    if (!foundSoi) return false;
+
+    size_t secondSoi = 0;
+    bool mpfFromMpf = findSecondaryStartFromMpf(&secondSoi);
+    bool hasSecond = mpfFromMpf;
+    if (!hasSecond)
+    {
+        size_t firstEoiFallback = 0;
+        for (size_t i = firstSoi + 2; i + 1 < len; ++i)
+        {
+            if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD9)
+            {
+                firstEoiFallback = i + 1;
+                break;
+            }
+        }
+        if (firstEoiFallback == 0) return false;
+
+        for (size_t i = firstEoiFallback + 1; i + 1 < len; ++i)
+        {
+            if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD8)
+            {
+                secondSoi = i;
+                hasSecond = true;
+                break;
+            }
+        }
+        if (!hasSecond) return false;
+    }
+
+    size_t firstEoi = 0;
+    if (secondSoi > 1)
+    {
+        for (size_t i = secondSoi; i-- > 1;)
+        {
+            if (jpegData[i - 1] == 0xFF && jpegData[i] == 0xD9)
+            {
+                firstEoi = i;
+                break;
+            }
+        }
+    }
+    if (firstEoi == 0)
+    {
+        for (size_t i = firstSoi + 2; i + 1 < len; ++i)
+        {
+            if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD9)
+            {
+                firstEoi = i + 1;
+                break;
+            }
+        }
+    }
+    if (firstEoi == 0) return false;
+
+    size_t secondEoi = 0;
+    for (size_t i = secondSoi + 2; i + 1 < len; ++i)
+    {
+        if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD9)
+        {
+            secondEoi = i + 1;
+            break;
+        }
+    }
+    if (secondEoi == 0) return false;
+
+    if (!hasIsoApp2(secondSoi, secondEoi)) return false;
+
+    firstStart = static_cast<int>(firstSoi);
+    firstEnd = static_cast<int>(firstEoi);
+    secondStart = static_cast<int>(secondSoi);
+    secondEnd = static_cast<int>(secondEoi);
+
+    sdrSize = static_cast<size_t>(firstEnd - firstStart + 1);
+    gainSize = static_cast<size_t>(secondEnd - secondStart + 1);
+
+    sdrData.clear();
+    sdrData.resize(sdrSize);
+
+    sdrData_changed.clear();
+    sdrData_changed.resize(sdrSize);
+
+    gainmapData.clear();
+    gainmapData.resize(gainSize);
+
+    std::memcpy(sdrData.data(), jpegData.data() + firstStart, sdrSize);
+    std::memcpy(gainmapData.data(), jpegData.data() + secondStart, gainSize);
+
+    ULARGE_INTEGER gainmapOffset = {};
+    gainmapOffset.QuadPart = static_cast<ULONGLONG>(secondStart);
+
+    ULARGE_INTEGER region = {};
+    region.QuadPart = stats.cbSize.QuadPart - gainmapOffset.QuadPart;
+
+    ComPtr<IWICStream> gainmapStream;
+    IFRF(fact->CreateStream(&gainmapStream));
+    IFRF(gainmapStream->InitializeFromIStreamRegion(imageStream, gainmapOffset, region));
+
+    ComPtr<IWICBitmapDecoder> gainmapDecoder;
+    IFRF(fact->CreateDecoderFromStream(gainmapStream.Get(), nullptr, WICDecodeMetadataCacheOnLoad, &gainmapDecoder));
+    ComPtr<IWICBitmapFrameDecode> gainmapFrame;
+    IFRF(gainmapDecoder->GetFrame(0, &gainmapFrame));
+
+    ComPtr<IWICFormatConverter> fmt;
+    IFRF(fact->CreateFormatConverter(&fmt));
+    IFRF(fmt->Initialize(
+        gainmapFrame.Get(),
+        GUID_WICPixelFormat32bppPBGRA,
+        WICBitmapDitherTypeNone,
+        nullptr,
+        0.0f,
+        WICBitmapPaletteTypeCustom));
+
+    IFRF(fmt.As(&m_appleHdrGainMap.wicSource));
+
+    return true;
+}
+
 bool ImageLoader::TryLoadAppleHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapFrameDecode* frame)
 {
     auto fact = m_deviceResources->GetWicImagingFactory();
@@ -816,55 +1153,163 @@ bool ImageLoader::TryLoadAppleHdrGainMapJpegMpo(IStream* imageStream, IWICBitmap
     if (appleMftr.vt != VT_LPSTR) return false;
     if (strcmp("Apple", appleMftr.pszVal) != 0) return false;
 
-    // Find the APP2 MP Extensions block
-    ComPtr<IWICMetadataBlockReader> blockReader;
-    IFRF(frame->QueryInterface(IID_PPV_ARGS(&blockReader)));
-
-    UINT count = 0;
-    IFRF(blockReader->GetCount(&count));
-
     ULARGE_INTEGER gainmapOffset = {};
-
-    // WIC doesn't natively understand the APP2 MPF block so we have to iterate and look for it ourselves.
-    for (UINT i = 0; i < count; i++)
+    auto tryFindMpfOffset = [&]() -> bool
     {
-        ComPtr<IWICMetadataReader> reader;
-        IFRF(blockReader->GetReaderByIndex(i, &reader));
+        STATSTG stats = {};
+        if (FAILED(imageStream->Stat(&stats, STATFLAG_NONAME))) return false;
+        if (stats.cbSize.QuadPart <= 4) return false;
 
-        // NOTE: From this point in the loop, any failures should just continue to the next block.
-        GUID metaFmt = {};
-        IFRF(reader->GetMetadataFormat(&metaFmt));
-        if (metaFmt != GUID_MetadataFormatUnknown) continue;
+        std::vector<BYTE> fileBuf;
+        fileBuf.resize(static_cast<size_t>(stats.cbSize.QuadPart));
 
-        CPropVariant id, value;
-        IFRF(reader->GetValueByIndex(0, nullptr, &id, &value));
-        if (value.vt != 65) continue; // VT_BLOB
-        if (value.blob.cbSize != sizeof(m_appleApp2MPBlock)) continue;
+        LARGE_INTEGER zero = {};
+        imageStream->Seek(zero, STREAM_SEEK_SET, nullptr);
+        ULONG read = 0;
+        if (FAILED(imageStream->Read(fileBuf.data(), static_cast<ULONG>(fileBuf.size()), &read))) return false;
+        if (read != fileBuf.size()) return false;
 
-        // Grab the offset before it's wiped out by the validity check.
-        assert(m_appleApp2MPBlockMagicOffset < value.blob.cbSize);
+        const size_t len = fileBuf.size();
 
-        // The known APP2 header specifies Big Endian.
-        ULARGE_INTEGER tempOffset = {};
-        tempOffset.QuadPart =
-            value.blob.pBlobData[m_appleApp2MPBlockMagicOffset + 0] << 24 |
-            value.blob.pBlobData[m_appleApp2MPBlockMagicOffset + 1] << 16 |
-            value.blob.pBlobData[m_appleApp2MPBlockMagicOffset + 2] << 8  |
-            value.blob.pBlobData[m_appleApp2MPBlockMagicOffset + 3];
-
-        // Fill in the known dynamic bytes with dummy values (0xFF).
-        for (int j = 0; j < ARRAYSIZE(m_appleApp2MPBlockDynamicBytes); j++)
+        auto read16 = [&](size_t offset, bool bigEndian) -> uint16_t
         {
-            assert(m_appleApp2MPBlockDynamicBytes[j] < value.blob.cbSize);
-            value.blob.pBlobData[m_appleApp2MPBlockDynamicBytes[j]] = 0xFF;
+            if (bigEndian)
+            {
+                return static_cast<uint16_t>(fileBuf[offset] << 8 | fileBuf[offset + 1]);
+            }
+            return static_cast<uint16_t>(fileBuf[offset] | (fileBuf[offset + 1] << 8));
+        };
+
+        auto read32 = [&](size_t offset, bool bigEndian) -> uint32_t
+        {
+            if (bigEndian)
+            {
+                return static_cast<uint32_t>(fileBuf[offset] << 24 |
+                    fileBuf[offset + 1] << 16 |
+                    fileBuf[offset + 2] << 8 |
+                    fileBuf[offset + 3]);
+            }
+            return static_cast<uint32_t>(fileBuf[offset] |
+                (fileBuf[offset + 1] << 8) |
+                (fileBuf[offset + 2] << 16) |
+                (fileBuf[offset + 3] << 24));
+        };
+
+        for (size_t i = 0; i + 10 < len; ++i)
+        {
+            if (fileBuf[i] != 0xFF || fileBuf[i + 1] != 0xE2) continue;
+
+            uint16_t segLen = static_cast<uint16_t>(fileBuf[i + 2] << 8 | fileBuf[i + 3]);
+            if (segLen < 2) continue;
+
+            size_t segStart = i + 4;
+            size_t segDataLen = segLen - 2;
+            size_t segEnd = segStart + segDataLen;
+            if (segEnd > len) continue;
+
+            if (segDataLen >= 4 && memcmp(fileBuf.data() + segStart, "MPF\0", 4) == 0)
+            {
+                size_t tiffStart = segStart + 4;
+                if (tiffStart + 8 > segEnd) continue;
+
+                bool bigEndian = fileBuf[tiffStart] == 0x4D && fileBuf[tiffStart + 1] == 0x4D;
+                bool littleEndian = fileBuf[tiffStart] == 0x49 && fileBuf[tiffStart + 1] == 0x49;
+                if (!bigEndian && !littleEndian) continue;
+
+                uint32_t ifdOffset = read32(tiffStart + 4, bigEndian);
+                size_t ifdStart = tiffStart + ifdOffset;
+                if (ifdStart + 2 > segEnd) continue;
+
+                uint16_t entryCount = read16(ifdStart, bigEndian);
+                size_t entryPos = ifdStart + 2;
+                size_t entryBytes = static_cast<size_t>(entryCount) * 12;
+                if (entryPos + entryBytes > segEnd) continue;
+
+                uint32_t mpEntryOffset = 0;
+                uint32_t mpEntryCount = 0;
+                for (uint16_t e = 0; e < entryCount; ++e)
+                {
+                    size_t base = entryPos + static_cast<size_t>(e) * 12;
+                    uint16_t tag = read16(base, bigEndian);
+                    if (tag == 0xB002)
+                    {
+                        mpEntryCount = read32(base + 4, bigEndian);
+                        mpEntryOffset = read32(base + 8, bigEndian);
+                        break;
+                    }
+                }
+
+                if (mpEntryOffset == 0 || mpEntryCount < 32) continue;
+
+                size_t mpEntryStart = tiffStart + mpEntryOffset;
+                if (mpEntryStart + 32 > segEnd) continue;
+
+                size_t secondEntry = mpEntryStart + 16;
+                uint32_t secondOffset = read32(secondEntry + 8, bigEndian);
+                size_t candidate = tiffStart + secondOffset;
+                if (candidate + 1 >= len) continue;
+                if (fileBuf[candidate] != 0xFF || fileBuf[candidate + 1] != 0xD8) continue;
+
+                gainmapOffset.QuadPart = static_cast<ULONGLONG>(candidate);
+                imageStream->Seek(zero, STREAM_SEEK_SET, nullptr);
+                return true;
+            }
         }
 
-        // A not so robust check against magic values since this is much simpler than a true parser.
-        if (memcmp(value.blob.pBlobData, m_appleApp2MPBlock, sizeof(m_appleApp2MPBlock)) != 0) continue;
+        imageStream->Seek(zero, STREAM_SEEK_SET, nullptr);
+        return false;
+    };
 
-        // If we get here we've validated all of the data we can in the primary image and should move to the second image.
-        gainmapOffset = tempOffset;
-        break;
+    if (!tryFindMpfOffset())
+    {
+        // Find the APP2 MP Extensions block
+        ComPtr<IWICMetadataBlockReader> blockReader;
+        IFRF(frame->QueryInterface(IID_PPV_ARGS(&blockReader)));
+
+        UINT count = 0;
+        IFRF(blockReader->GetCount(&count));
+
+        // WIC doesn't natively understand the APP2 MPF block so we have to iterate and look for it ourselves.
+        for (UINT i = 0; i < count; i++)
+        {
+            ComPtr<IWICMetadataReader> reader;
+            IFRF(blockReader->GetReaderByIndex(i, &reader));
+
+            // NOTE: From this point in the loop, any failures should just continue to the next block.
+            GUID metaFmt = {};
+            IFRF(reader->GetMetadataFormat(&metaFmt));
+            if (metaFmt != GUID_MetadataFormatUnknown) continue;
+
+            CPropVariant id, value;
+            IFRF(reader->GetValueByIndex(0, nullptr, &id, &value));
+            if (value.vt != 65) continue; // VT_BLOB
+            if (value.blob.cbSize != sizeof(m_appleApp2MPBlock)) continue;
+
+            // Grab the offset before it's wiped out by the validity check.
+            assert(m_appleApp2MPBlockMagicOffset < value.blob.cbSize);
+
+            // The known APP2 header specifies Big Endian.
+            ULARGE_INTEGER tempOffset = {};
+            tempOffset.QuadPart =
+                value.blob.pBlobData[m_appleApp2MPBlockMagicOffset + 0] << 24 |
+                value.blob.pBlobData[m_appleApp2MPBlockMagicOffset + 1] << 16 |
+                value.blob.pBlobData[m_appleApp2MPBlockMagicOffset + 2] << 8 |
+                value.blob.pBlobData[m_appleApp2MPBlockMagicOffset + 3];
+
+            // Fill in the known dynamic bytes with dummy values (0xFF).
+            for (int j = 0; j < ARRAYSIZE(m_appleApp2MPBlockDynamicBytes); j++)
+            {
+                assert(m_appleApp2MPBlockDynamicBytes[j] < value.blob.cbSize);
+                value.blob.pBlobData[m_appleApp2MPBlockDynamicBytes[j]] = 0xFF;
+            }
+
+            // A not so robust check against magic values since this is much simpler than a true parser.
+            if (memcmp(value.blob.pBlobData, m_appleApp2MPBlock, sizeof(m_appleApp2MPBlock)) != 0) continue;
+
+            // If we get here we've validated all of the data we can in the primary image and should move to the second image.
+            gainmapOffset = tempOffset;
+            break;
+        }
     }
 
     if (gainmapOffset.QuadPart == 0) return false;
@@ -895,7 +1340,10 @@ bool ImageLoader::TryLoadAppleHdrGainMapJpegMpo(IStream* imageStream, IWICBitmap
 
     CPropVariant gainmapVersion;
     IFRF(gainmapQuery->GetMetadataByName(L"/xmp/{wstr=http://ns.apple.com/HDRGainMap/1.0/}:HDRGainMapVersion", &gainmapVersion));
-    if (wcscmp(gainmapVersion.pwszVal, L"65536") != 0) return false;
+    if (gainmapVersion.vt != VT_LPWSTR || gainmapVersion.pwszVal == nullptr) return false;
+    wchar_t* end = nullptr;
+    long versionValue = wcstol(gainmapVersion.pwszVal, &end, 10);
+    if (end == gainmapVersion.pwszVal || versionValue <= 0) return false;
 
     // All validated, now grab the data.
     ComPtr<IWICFormatConverter> fmt;
@@ -1649,10 +2097,16 @@ void ImageLoader::generateEncodeSDRimage() {
     //原本缩略图在前，原始图在后，解码时会优先查看缩略图，因此在导出ISO HDR时需要颠倒数据位置
     changedImage.clear();
     changedImage = jpegData;
-    std::memcpy(changedImage.data() + thumbnailStart, jpegData.data() + mainImageStart, mainImageEnd - mainImageStart + 1);
-    std::memcpy(changedImage.data() + thumbnailStart + mainImageEnd - mainImageStart + 1, jpegData.data() + thumbnailStart, thumbnailEnd - thumbnailStart + 1);
+    if (m_imageInfo.hasCuvaHdrGainMap || m_imageInfo.hasHuaweiIsoJpegHdrGainMap)
+    {
+        std::memcpy(changedImage.data() + thumbnailStart, jpegData.data() + mainImageStart, mainImageEnd - mainImageStart + 1);
+        std::memcpy(changedImage.data() + thumbnailStart + mainImageEnd - mainImageStart + 1, jpegData.data() + thumbnailStart, thumbnailEnd - thumbnailStart + 1);
+    }
 
-    exif_result.exif_ptr = &changedImage[exif_result.exif_pos];
+    if (exif_result.has_exif)
+    {
+        exif_result.exif_ptr = &changedImage[exif_result.exif_pos];
+    }
 
     for (int i = 0; i < changedImage.size(); i++) {
         if (changedImage[i] == 0x5F && changedImage[i + 1] == 0x63 &&

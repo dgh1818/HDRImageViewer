@@ -19,7 +19,8 @@ namespace HDRImageViewerCS
         public const string LABEL_NO                   = "No";
         public const string LABEL_BITDEPTH             = "Bits per channel: ";
         public const string LABEL_FLOAT                = "Floating point: ";
-        public const string LABEL_MAXCLL               = "Estimated MaxCLL: ";
+        public const string LABEL_GAINMAPTYPE          = "Gainmap type: ";
+        public const string LABEL_MAXCLL               = "Estimated MaxCLL (ref 203 nits): ";
         public const string LABEL_NA                   = "N/A";
         public const string LABEL_MEDCLL               = "Estimated MedianCLL: ";
         public const string LABEL_GAMUTMAP             = "Constrain image gamut: ";

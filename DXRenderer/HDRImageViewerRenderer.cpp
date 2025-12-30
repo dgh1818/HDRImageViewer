@@ -34,7 +34,7 @@ HDRImageViewerRenderer::HDRImageViewerRenderer(
     m_minZoom(1.0f), // Dynamically calculated on window size.
     m_imageOffset(),
     m_pointerPos(),
-    m_imageCLL{ -1.0f, -1.0f, false },
+    m_imageCLL{ -1.0f, -1.0f, -1.0f, false },
     m_exposureAdjust(1.0f),
     m_dispMaxCLLOverride(0.0f),
     m_imageInfo{},
@@ -978,11 +978,9 @@ void HDRImageViewerRenderer::UpdateImageTransformState()
 void HDRImageViewerRenderer::ComputeHdrMetadata()
 {
     // Initialize with a sentinel value.
-    m_imageCLL = { -1.0f, -1.0f, false };
+    m_imageCLL = { -1.0f, -1.0f, -1.0f, false };
 
-    // HDR metadata is not meaningful for SDR or WCG images.
-    if ((!m_isComputeSupported) ||
-        (m_imageInfo.imageKind != AdvancedColorKind::HighDynamicRange))
+    if (!m_isComputeSupported)
     {
         return;
     }
@@ -1039,28 +1037,39 @@ void HDRImageViewerRenderer::ComputeHdrMetadata()
     }
 
     float binNormMax = static_cast<float>(maxCLLbin) / static_cast<float>(sc_histNumBins);
-    m_imageCLL.maxNits = powf(binNormMax, 1 / sc_histGamma) * sc_histMaxNits;
+    float maxNitsScene = powf(binNormMax, 1 / sc_histGamma) * sc_histMaxNits;
 
     float binNormAvg = static_cast<float>(avgCLLbin) / static_cast<float>(sc_histNumBins);
-    m_imageCLL.medianNits = powf(binNormAvg, 1 / sc_histGamma) * sc_histMaxNits;
+    float medianNitsScene = powf(binNormAvg, 1 / sc_histGamma) * sc_histMaxNits;
 
     // Some drivers have a bug where histogram will always return 0. Or some images are pure black.
     // Treat these cases as unknown.
-    if (m_imageCLL.maxNits == 0.0f)
+    if (maxNitsScene == 0.0f)
     {
-        m_imageCLL = { -1.0f, -1.0f };
+        m_imageCLL = { -1.0f, -1.0f, -1.0f, false };
+        return;
     }
 
-    // Certain HDR image types use recovered luminance and therefore are display/output-referred.
-    // You can't interpret the histogram for these images as physical nits; they are only useful
-    // to understand relative intensity.
-    if (m_imageInfo.hasAppleHdrGainMap == true)
+    // 1.0 in scRGB corresponds to D2D1_SCENE_REFERRED_SDR_WHITE_LEVEL nits.
+    m_imageCLL.maxNits255 = maxNitsScene * (203.0f / D2D1_SCENE_REFERRED_SDR_WHITE_LEVEL);
+
+    // HDR metadata is not meaningful for SDR or WCG images.
+    if (m_imageInfo.imageKind == AdvancedColorKind::HighDynamicRange)
     {
-        m_imageCLL.isSceneReferred = false;
-    }
-    else
-    {
-        m_imageCLL.isSceneReferred = true;
+        m_imageCLL.maxNits = maxNitsScene;
+        m_imageCLL.medianNits = medianNitsScene;
+
+        // Certain HDR image types use recovered luminance and therefore are display/output-referred.
+        // You can't interpret the histogram for these images as physical nits; they are only useful
+        // to understand relative intensity.
+        if (m_imageInfo.hasAppleHdrGainMap == true)
+        {
+            m_imageCLL.isSceneReferred = false;
+        }
+        else
+        {
+            m_imageCLL.isSceneReferred = true;
+        }
     }
 
     // HDR metadata computation is completed before the app rendering options are known, so don't

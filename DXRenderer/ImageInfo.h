@@ -19,6 +19,7 @@ namespace DXRenderer
         bool                                            hasEXRChromaticitiesInfo;
 
         bool                                            hasCuvaHdrGainMap;
+        bool                                            hasHuaweiIsoJpegHdrGainMap;
         bool                                            hasIsoJpegHdrGainMap;
     };
 
@@ -26,6 +27,7 @@ namespace DXRenderer
     {
         float   maxNits;
         float   medianNits;
+        float   maxNits255;
         bool    isSceneReferred; // If False, the CLL values are not calibrated to actual nits
                                  // should only be used to understand relative intensity of the image.
     };

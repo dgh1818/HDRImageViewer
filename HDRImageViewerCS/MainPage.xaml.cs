@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation.Collections;
 using Windows.Foundation.Metadata;
 using Windows.Graphics.Display;
@@ -47,6 +48,8 @@ namespace HDRImageViewerCS
     /// </summary>
     public sealed partial class DXViewerPage : Page
     {
+        private const float Hdr10MaxNits = 1024.0f;
+
         HDRImageViewerRenderer renderer;
         GestureRecognizer gestureRecognizer;
 
@@ -79,7 +82,7 @@ namespace HDRImageViewerCS
 
             isWindowVisible = true;
             isImageValid = false;
-            imageCLL.maxNits = imageCLL.medianNits = -1.0f;
+            imageCLL.maxNits = imageCLL.medianNits = imageCLL.maxNits255 = -1.0f;
 
             // Register event handlers for page lifecycle.
             var window = Window.Current.CoreWindow;
@@ -622,6 +625,42 @@ namespace HDRImageViewerCS
             }
         }
 
+        private void Page_DragOver(object sender, DragEventArgs e)
+        {
+            if (e.DataView.Contains(StandardDataFormats.StorageItems))
+            {
+                e.AcceptedOperation = DataPackageOperation.Copy;
+                e.DragUIOverride.Caption = "Open image";
+            }
+            else
+            {
+                e.AcceptedOperation = DataPackageOperation.None;
+                e.DragUIOverride.Caption = "Unsupported";
+            }
+
+            e.DragUIOverride.IsCaptionVisible = true;
+            e.DragUIOverride.IsContentVisible = false;
+            e.Handled = true;
+        }
+
+        private async void Page_Drop(object sender, DragEventArgs e)
+        {
+            if (!e.DataView.Contains(StandardDataFormats.StorageItems)) return;
+
+            var items = await e.DataView.GetStorageItemsAsync();
+            var file = items.OfType<StorageFile>().FirstOrDefault();
+            if (file == null) return;
+
+            try
+            {
+                await LoadImageAsync(file);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Failed to load dropped image: {ex}");
+            }
+        }
+
         private async Task LoadImageListAsync(StorageFile imageFile)
         {
             _isLoadingFileList = true;
@@ -631,6 +670,14 @@ namespace HDRImageViewerCS
             {
                 // 获取当前图片所在的文件夹
                 StorageFolder newFolder = await imageFile.GetParentAsync();
+                if (newFolder == null)
+                {
+                    _currentFolder = null;
+                    _fileList = new List<StorageFile> { imageFile };
+                    _currentIndex = 0;
+                    Debug.WriteLine("GetParentAsync returned null; using single-file list.");
+                    return;
+                }
 
                 // 检查文件夹是否变化
                 bool folderChanged = _currentFolder == null ||
@@ -793,14 +840,38 @@ namespace HDRImageViewerCS
             ImageHasProfile.Text = UIStrings.LABEL_COLORPROFILE + (imageInfo.countColorProfiles > 0 ? UIStrings.LABEL_YES : UIStrings.LABEL_NO);
             ImageBitDepth.Text = UIStrings.LABEL_BITDEPTH + imageInfo.bitsPerChannel;
             ImageIsFloat.Text = UIStrings.LABEL_FLOAT + (imageInfo.isFloat ? UIStrings.LABEL_YES : UIStrings.LABEL_NO);
+            int gainmapType = 0;
+            string gainmapLabel = "None";
+            if (imageInfo.hasCuvaHdrGainMap)
+            {
+                gainmapType = 1;
+                gainmapLabel = "Huawei HDR";
+            }
+            else if (imageInfo.hasHuaweiIsoJpegHdrGainMap)
+            {
+                gainmapType = 2;
+                gainmapLabel = "Huawei ISO";
+            }
+            else if (imageInfo.hasIsoJpegHdrGainMap)
+            {
+                gainmapType = 3;
+                gainmapLabel = "ISO";
+            }
+            else if (imageInfo.hasAppleHdrGainMap)
+            {
+                gainmapType = 4;
+                gainmapLabel = "Apple HDR";
+            }
+            ImageGainmapType.Text = UIStrings.LABEL_GAINMAPTYPE + gainmapType.ToString() + " (" + gainmapLabel + ")";
 
-            if (imageCLL.maxNits < 0.0f || imageCLL.isSceneReferred == false)
+            if (imageCLL.maxNits255 < 0.0f)
             {
                 ImageMaxCLL.Text = UIStrings.LABEL_MAXCLL + UIStrings.LABEL_NA;
             }
             else
             {
-                ImageMaxCLL.Text = UIStrings.LABEL_MAXCLL + imageCLL.maxNits.ToString("N1") + UIStrings.LABEL_LUMINANCE_NITS;
+                float maxNits = Math.Min(Math.Max(imageCLL.maxNits255, 0.0f), Hdr10MaxNits);
+                ImageMaxCLL.Text = UIStrings.LABEL_MAXCLL + maxNits.ToString("N1") + UIStrings.LABEL_LUMINANCE_NITS;
             }
 
             if (imageCLL.medianNits < 0.0f || imageCLL.isSceneReferred == false)
@@ -858,7 +929,7 @@ namespace HDRImageViewerCS
             }
             else
             {
-                if(imageInfo.hasCuvaHdrGainMap || imageInfo.hasIsoJpegHdrGainMap)
+                if(imageInfo.hasCuvaHdrGainMap || imageInfo.hasHuaweiIsoJpegHdrGainMap || imageInfo.hasIsoJpegHdrGainMap)
                 {
                     renderer.ExportImageToISOJpeg(ras);
                 }
