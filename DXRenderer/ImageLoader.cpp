@@ -623,9 +623,11 @@ int ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapFr
     CPropVariant cuvaMftr;
     CPropVariant propvarTitle;
 
-    IFRF(frame->GetMetadataQueryReader(&query));
-    IFRF(query->GetMetadataByName(L"/app1/ifd/{ushort=270}", &propvarTitle));
-    IFRF(query->GetMetadataByName(L"/app1/ifd/{ushort=271}", &cuvaMftr));
+    if (SUCCEEDED(frame->GetMetadataQueryReader(&query)))
+    {
+        query->GetMetadataByName(L"/app1/ifd/{ushort=270}", &propvarTitle);
+        query->GetMetadataByName(L"/app1/ifd/{ushort=271}", &cuvaMftr);
+    }
 
     LARGE_INTEGER zero = {};
     imageStream->Seek(zero, STREAM_SEEK_SET, nullptr);
@@ -722,11 +724,17 @@ int ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapFr
     }
 
     if (secondStart == -1) {
-        if (cuvaMftr.vt != VT_LPSTR) return false;
-        if (strcmp("HUAWEI", cuvaMftr.pszVal) != 0) return 0;
+        bool isHuawei = false;
+        if (cuvaMftr.vt == VT_LPSTR && cuvaMftr.pszVal != nullptr)
+        {
+            isHuawei = _stricmp(cuvaMftr.pszVal, "HUAWEI") == 0;
+        }
+        else if (cuvaMftr.vt == VT_LPWSTR && cuvaMftr.pwszVal != nullptr)
+        {
+            isHuawei = _wcsicmp(cuvaMftr.pwszVal, L"HUAWEI") == 0;
+        }
 
-        if (propvarTitle.vt != VT_LPSTR) return false;
-        if (strcmp("_cuva", propvarTitle.pszVal) != 0) return 0;
+        if (!isHuawei) return 0;
 
         for (int i = firstStart; i < len - 3; ++i)
         {
@@ -1628,6 +1636,10 @@ void ImageLoader::PopulateImageInfoACKind(ImageInfo& info, _In_ IWICBitmapSource
     }
 
     if (m_imageInfo.hasAppleHdrGainMap == true)
+    {
+        m_imageInfo.imageKind = AdvancedColorKind::HighDynamicRange;
+    }
+    if (m_imageInfo.hasCuvaHdrGainMap == true)
     {
         m_imageInfo.imageKind = AdvancedColorKind::HighDynamicRange;
     }
