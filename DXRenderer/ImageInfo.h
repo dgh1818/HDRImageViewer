@@ -21,6 +21,8 @@ namespace DXRenderer
         bool                                            hasCuvaHdrGainMap;
         bool                                            hasHuaweiIsoJpegHdrGainMap;
         bool                                            hasIsoJpegHdrGainMap;
+        bool                                            hasHdrGainMapHeadroom;
+        float                                           hdrGainMapHeadroom;
     };
 
     public value struct ImageCLL

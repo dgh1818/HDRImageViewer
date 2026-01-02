@@ -5,6 +5,8 @@
 #include "DirectXTex\DirectXTexEXR.h"
 #include <iostream>
 #include <Windows.h>
+#include <cstdlib>
+#include <cstring>
 
 using namespace DXRenderer;
 
@@ -18,6 +20,393 @@ using namespace Windows::Graphics::Display;
 static const unsigned int sc_MaxBytesPerPixel = 16; // Covers all supported image formats (128bpp).
 static bool lutInitialized = false;
 static float sRGBToLinearLUT[256];
+
+static bool IsAsciiSpace(BYTE value)
+{
+    return value == ' ' || value == '\t' || value == '\r' || value == '\n';
+}
+
+static bool TryParseHeadroomValue(const BYTE* data, size_t len, const char* key, float& outValue)
+{
+    if (!data || !key)
+    {
+        return false;
+    }
+
+    const size_t keyLen = std::strlen(key);
+    if (keyLen == 0 || len < keyLen)
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i + keyLen < len; ++i)
+    {
+        if (std::memcmp(data + i, key, keyLen) != 0)
+        {
+            continue;
+        }
+
+        size_t pos = i + keyLen;
+        while (pos < len && IsAsciiSpace(data[pos]))
+        {
+            ++pos;
+        }
+
+        if (pos >= len || data[pos] != '=')
+        {
+            continue;
+        }
+
+        ++pos;
+        while (pos < len && IsAsciiSpace(data[pos]))
+        {
+            ++pos;
+        }
+
+        if (pos >= len || (data[pos] != '"' && data[pos] != '\''))
+        {
+            continue;
+        }
+
+        const BYTE quote = data[pos++];
+        char numberBuf[64] = {};
+        size_t count = 0;
+
+        while (pos < len && data[pos] != quote && count + 1 < ARRAYSIZE(numberBuf))
+        {
+            const char c = static_cast<char>(data[pos]);
+            if ((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E')
+            {
+                numberBuf[count++] = c;
+            }
+            else if (count > 0)
+            {
+                break;
+            }
+            ++pos;
+        }
+
+        if (count == 0)
+        {
+            continue;
+        }
+
+        char* endPtr = nullptr;
+        const float parsed = strtof(numberBuf, &endPtr);
+        if (endPtr == numberBuf)
+        {
+            continue;
+        }
+
+        outValue = parsed;
+        return true;
+    }
+
+    return false;
+}
+
+static bool TryParseGainMapHeadroomFromBytes(const BYTE* data, size_t len, float& outValue)
+{
+    static const char* kHeadroomKeys[] =
+    {
+        "HDRGainMapHeadroom",
+        "hdrgm:HDRCapacityMax",
+        "HDRCapacityMax",
+    };
+
+    for (const char* key : kHeadroomKeys)
+    {
+        if (TryParseHeadroomValue(data, len, key, outValue))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void TryUpdateHdrGainMapHeadroom(ImageInfo& info, const BYTE* data, size_t len)
+{
+    if (info.hasHdrGainMapHeadroom)
+    {
+        return;
+    }
+
+    float headroom = 0.0f;
+    if (TryParseGainMapHeadroomFromBytes(data, len, headroom) && headroom > 0.0f)
+    {
+        info.hasHdrGainMapHeadroom = true;
+        info.hdrGainMapHeadroom = headroom;
+    }
+}
+
+static bool TryParseAttributeValue(const BYTE* data, size_t len, const char* key, char* outValue, size_t outValueLen)
+{
+    if (!data || !key || !outValue || outValueLen == 0)
+    {
+        return false;
+    }
+
+    const size_t keyLen = std::strlen(key);
+    if (keyLen == 0 || len < keyLen)
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i + keyLen < len; ++i)
+    {
+        if (std::memcmp(data + i, key, keyLen) != 0)
+        {
+            continue;
+        }
+
+        size_t pos = i + keyLen;
+        while (pos < len && IsAsciiSpace(data[pos]))
+        {
+            ++pos;
+        }
+
+        if (pos >= len || data[pos] != '=')
+        {
+            continue;
+        }
+
+        ++pos;
+        while (pos < len && IsAsciiSpace(data[pos]))
+        {
+            ++pos;
+        }
+
+        if (pos >= len || (data[pos] != '"' && data[pos] != '\''))
+        {
+            continue;
+        }
+
+        const BYTE quote = data[pos++];
+        size_t count = 0;
+        while (pos < len && data[pos] != quote && count + 1 < outValueLen)
+        {
+            outValue[count++] = static_cast<char>(data[pos]);
+            ++pos;
+        }
+
+        if (count == 0)
+        {
+            continue;
+        }
+
+        outValue[count] = '\0';
+        return true;
+    }
+
+    return false;
+}
+
+static size_t ParseFloatList(const char* text, float* values, size_t maxCount)
+{
+    if (!text || !values || maxCount == 0)
+    {
+        return 0;
+    }
+
+    size_t count = 0;
+    const char* cursor = text;
+    while (*cursor != '\0' && count < maxCount)
+    {
+        while (*cursor != '\0' && (IsAsciiSpace(static_cast<BYTE>(*cursor)) || *cursor == ','))
+        {
+            ++cursor;
+        }
+
+        if (*cursor == '\0')
+        {
+            break;
+        }
+
+        char* endPtr = nullptr;
+        float parsed = strtof(cursor, &endPtr);
+        if (endPtr == cursor)
+        {
+            break;
+        }
+
+        values[count++] = parsed;
+        cursor = endPtr;
+    }
+
+    return count;
+}
+
+static bool TryParseFloatAttributeList(const BYTE* data, size_t len, const char* key, float* outValues, size_t maxCount)
+{
+    char valueBuf[128] = {};
+    if (!TryParseAttributeValue(data, len, key, valueBuf, ARRAYSIZE(valueBuf)))
+    {
+        return false;
+    }
+
+    float parsedValues[3] = {};
+    size_t parsedCount = ParseFloatList(valueBuf, parsedValues, ARRAYSIZE(parsedValues));
+    if (parsedCount == 0)
+    {
+        return false;
+    }
+
+    float fillValue = parsedValues[0];
+    for (size_t i = 0; i < maxCount; ++i)
+    {
+        if (parsedCount == 1)
+        {
+            outValues[i] = fillValue;
+        }
+        else if (parsedCount == 2)
+        {
+            outValues[0] = parsedValues[0];
+            outValues[1] = parsedValues[1];
+            outValues[2] = parsedValues[1];
+            break;
+        }
+        else
+        {
+            outValues[0] = parsedValues[0];
+            outValues[1] = parsedValues[1];
+            outValues[2] = parsedValues[2];
+            break;
+        }
+    }
+
+    return true;
+}
+
+static bool TryParseFloatAttributeValue(const BYTE* data, size_t len, const char* key, float& outValue)
+{
+    char valueBuf[64] = {};
+    if (!TryParseAttributeValue(data, len, key, valueBuf, ARRAYSIZE(valueBuf)))
+    {
+        return false;
+    }
+
+    char* endPtr = nullptr;
+    float parsed = strtof(valueBuf, &endPtr);
+    if (endPtr == valueBuf)
+    {
+        return false;
+    }
+
+    outValue = parsed;
+    return true;
+}
+
+static bool TryParseBoolAttributeValue(const BYTE* data, size_t len, const char* key, bool& outValue)
+{
+    char valueBuf[16] = {};
+    if (!TryParseAttributeValue(data, len, key, valueBuf, ARRAYSIZE(valueBuf)))
+    {
+        return false;
+    }
+
+    if (_stricmp(valueBuf, "true") == 0)
+    {
+        outValue = true;
+        return true;
+    }
+
+    if (_stricmp(valueBuf, "false") == 0)
+    {
+        outValue = false;
+        return true;
+    }
+
+    return false;
+}
+
+void ImageLoader::TryUpdateGainMapMetadataFromBytes(const BYTE* data, size_t len)
+{
+    if (!data || len == 0)
+    {
+        return;
+    }
+
+    TryUpdateHdrGainMapHeadroom(m_imageInfo, data, len);
+
+    if (m_gainMapMetadata.hasMetadata)
+    {
+        return;
+    }
+
+    GainMapMetadata updated = m_gainMapMetadata;
+    const float headroom = (m_imageInfo.hasHdrGainMapHeadroom && m_imageInfo.hdrGainMapHeadroom > 0.0f)
+        ? m_imageInfo.hdrGainMapHeadroom
+        : 4.0f;
+
+    updated.hasMetadata = false;
+    updated.baseRenditionIsHdr = false;
+    for (int c = 0; c < 3; ++c)
+    {
+        updated.gainMapMin[c] = 0.0f;
+        updated.gainMapMax[c] = headroom;
+        updated.gainMapGamma[c] = 1.0f;
+        updated.offsetSdr[c] = 0.0f;
+        updated.offsetHdr[c] = 0.0f;
+    }
+    updated.hdrCapacityMin = 0.0f;
+    updated.hdrCapacityMax = headroom;
+
+    bool found = false;
+
+    if (TryParseFloatAttributeList(data, len, "hdrgm:GainMapMin", updated.gainMapMin, 3) ||
+        TryParseFloatAttributeList(data, len, "GainMapMin", updated.gainMapMin, 3))
+    {
+        found = true;
+    }
+
+    if (TryParseFloatAttributeList(data, len, "hdrgm:GainMapMax", updated.gainMapMax, 3) ||
+        TryParseFloatAttributeList(data, len, "GainMapMax", updated.gainMapMax, 3))
+    {
+        found = true;
+    }
+
+    if (TryParseFloatAttributeList(data, len, "hdrgm:Gamma", updated.gainMapGamma, 3) ||
+        TryParseFloatAttributeList(data, len, "Gamma", updated.gainMapGamma, 3))
+    {
+        found = true;
+    }
+
+    if (TryParseFloatAttributeList(data, len, "hdrgm:OffsetSDR", updated.offsetSdr, 3) ||
+        TryParseFloatAttributeList(data, len, "OffsetSDR", updated.offsetSdr, 3))
+    {
+        found = true;
+    }
+
+    if (TryParseFloatAttributeList(data, len, "hdrgm:OffsetHDR", updated.offsetHdr, 3) ||
+        TryParseFloatAttributeList(data, len, "OffsetHDR", updated.offsetHdr, 3))
+    {
+        found = true;
+    }
+
+    if (TryParseFloatAttributeValue(data, len, "hdrgm:HDRCapacityMin", updated.hdrCapacityMin) ||
+        TryParseFloatAttributeValue(data, len, "HDRCapacityMin", updated.hdrCapacityMin))
+    {
+        found = true;
+    }
+
+    if (TryParseFloatAttributeValue(data, len, "hdrgm:HDRCapacityMax", updated.hdrCapacityMax) ||
+        TryParseFloatAttributeValue(data, len, "HDRCapacityMax", updated.hdrCapacityMax))
+    {
+        found = true;
+    }
+
+    bool baseIsHdr = false;
+    if (TryParseBoolAttributeValue(data, len, "hdrgm:BaseRenditionIsHDR", baseIsHdr) ||
+        TryParseBoolAttributeValue(data, len, "BaseRenditionIsHDR", baseIsHdr))
+    {
+        updated.baseRenditionIsHdr = baseIsHdr;
+        found = true;
+    }
+
+    updated.hasMetadata = found;
+    m_gainMapMetadata = updated;
+}
 
 ImageLoader::ImageLoader(const std::shared_ptr<DeviceResources>& deviceResources, ImageLoaderOptions& options) :
     m_deviceResources(deviceResources),
@@ -71,6 +460,22 @@ ImageLoader::~ImageLoader()
 {
 }
 
+void ImageLoader::ResetGainMapMetadata()
+{
+    m_gainMapMetadata.hasMetadata = false;
+    m_gainMapMetadata.baseRenditionIsHdr = false;
+    for (int c = 0; c < 3; ++c)
+    {
+        m_gainMapMetadata.gainMapMin[c] = 0.0f;
+        m_gainMapMetadata.gainMapMax[c] = 4.0f;
+        m_gainMapMetadata.gainMapGamma[c] = 1.0f;
+        m_gainMapMetadata.offsetSdr[c] = 0.0f;
+        m_gainMapMetadata.offsetHdr[c] = 0.0f;
+    }
+    m_gainMapMetadata.hdrCapacityMin = 0.0f;
+    m_gainMapMetadata.hdrCapacityMax = 4.0f;
+}
+
 /// <summary>
 /// Performs CPU-side decoding of an image using WIC and reads key image parameters.
 /// </summary>
@@ -105,6 +510,10 @@ void ImageLoader::LoadImageFromWicInt(_In_ IStream* imageStream)
 
     GUID fmt;
     IFRIMG(decoder->GetContainerFormat(&fmt));
+
+    ResetGainMapMetadata();
+    m_imageInfo.hasHdrGainMapHeadroom = false;
+    m_imageInfo.hdrGainMapHeadroom = 0.0f;
 
     // Perform initial detection and handling of special case WIC decoders.
     if (fmt == GUID_ContainerFormatHeif)
@@ -204,6 +613,10 @@ ImageInfo ImageLoader::LoadImageFromDirectXTex(String^ filename, String^ extensi
 void ImageLoader::LoadImageFromDirectXTexInt(String^ filename, String^ extension)
 {
     EnforceStates(1, ImageLoaderState::NotInitialized);
+
+    ResetGainMapMetadata();
+    m_imageInfo.hasHdrGainMapHeadroom = false;
+    m_imageInfo.hdrGainMapHeadroom = 0.0f;
 
     ComPtr<IWICBitmapSource> decodedSource;
 
@@ -824,6 +1237,11 @@ int ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapFr
 
     IFRF(fmt.As(&m_appleHdrGainMap.wicSource));
 
+    if (gainmapType != 0 && !jpegData.empty())
+    {
+        TryUpdateGainMapMetadataFromBytes(jpegData.data(), jpegData.size());
+    }
+
 
     return gainmapType;
 }
@@ -1097,6 +1515,11 @@ bool ImageLoader::TryLoadIsoHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapFr
 
     if (!hasIsoApp2(secondSoi, secondEoi)) return false;
 
+    if (!jpegData.empty())
+    {
+        TryUpdateGainMapMetadataFromBytes(jpegData.data(), jpegData.size());
+    }
+
     firstStart = static_cast<int>(firstSoi);
     firstEnd = static_cast<int>(firstEoi);
     secondStart = static_cast<int>(secondSoi);
@@ -1162,13 +1585,13 @@ bool ImageLoader::TryLoadAppleHdrGainMapJpegMpo(IStream* imageStream, IWICBitmap
     if (strcmp("Apple", appleMftr.pszVal) != 0) return false;
 
     ULARGE_INTEGER gainmapOffset = {};
+    std::vector<BYTE> fileBuf;
     auto tryFindMpfOffset = [&]() -> bool
     {
         STATSTG stats = {};
         if (FAILED(imageStream->Stat(&stats, STATFLAG_NONAME))) return false;
         if (stats.cbSize.QuadPart <= 4) return false;
 
-        std::vector<BYTE> fileBuf;
         fileBuf.resize(static_cast<size_t>(stats.cbSize.QuadPart));
 
         LARGE_INTEGER zero = {};
@@ -1352,6 +1775,11 @@ bool ImageLoader::TryLoadAppleHdrGainMapJpegMpo(IStream* imageStream, IWICBitmap
     wchar_t* end = nullptr;
     long versionValue = wcstol(gainmapVersion.pwszVal, &end, 10);
     if (end == gainmapVersion.pwszVal || versionValue <= 0) return false;
+
+    if (!fileBuf.empty())
+    {
+        TryUpdateGainMapMetadataFromBytes(fileBuf.data(), fileBuf.size());
+    }
 
     // All validated, now grab the data.
     ComPtr<IWICFormatConverter> fmt;
@@ -1903,7 +2331,39 @@ void ImageLoader::CreateCpuMergedBitmap()
     }
 
     //// 逐像素计算写回 outBitmap
-    const float eps = 1.0f / 64.0f;
+    float gainMapMin[3] = { m_gainMapMetadata.gainMapMin[0], m_gainMapMetadata.gainMapMin[1], m_gainMapMetadata.gainMapMin[2] };
+    float gainMapMax[3] = { m_gainMapMetadata.gainMapMax[0], m_gainMapMetadata.gainMapMax[1], m_gainMapMetadata.gainMapMax[2] };
+    float gainMapGamma[3] = { m_gainMapMetadata.gainMapGamma[0], m_gainMapMetadata.gainMapGamma[1], m_gainMapMetadata.gainMapGamma[2] };
+    float offsetSdr[3] = { m_gainMapMetadata.offsetSdr[0], m_gainMapMetadata.offsetSdr[1], m_gainMapMetadata.offsetSdr[2] };
+    float offsetHdr[3] = { m_gainMapMetadata.offsetHdr[0], m_gainMapMetadata.offsetHdr[1], m_gainMapMetadata.offsetHdr[2] };
+    bool applyGainMap = !m_gainMapMetadata.baseRenditionIsHdr;
+
+    if (!m_gainMapMetadata.hasMetadata &&
+        m_imageInfo.hasHdrGainMapHeadroom &&
+        m_imageInfo.hdrGainMapHeadroom > 0.0f)
+    {
+        gainMapMax[0] = m_imageInfo.hdrGainMapHeadroom;
+        gainMapMax[1] = m_imageInfo.hdrGainMapHeadroom;
+        gainMapMax[2] = m_imageInfo.hdrGainMapHeadroom;
+    }
+
+    float gainMapDelta[3] = {};
+    for (int c = 0; c < 3; ++c)
+    {
+        if (gainMapGamma[c] <= 0.0f)
+        {
+            gainMapGamma[c] = 1.0f;
+        }
+
+        if (gainMapMax[c] < gainMapMin[c])
+        {
+            float temp = gainMapMax[c];
+            gainMapMax[c] = gainMapMin[c];
+            gainMapMin[c] = temp;
+        }
+
+        gainMapDelta[c] = gainMapMax[c] - gainMapMin[c];
+    }
 
     OutputDebugString(L"Processing pixels...\n");
     //for (UINT y = 0; y < height; y++)
@@ -1991,9 +2451,9 @@ void ImageLoader::CreateCpuMergedBitmap()
             B_main = lut_sRGBToLinear(B_main);
 
             // 读取增益图像素（PBGRA8）
-            float gainB = gainRow[4 * x + 0] / 128.0f; // [0.0, 2.0]
-            float gainG = gainRow[4 * x + 1] / 128.0f;
-            float gainR = gainRow[4 * x + 2] / 128.0f;
+            float gainB = gainRow[4 * x + 0] / 255.0f; // [0.0, 1.0]
+            float gainG = gainRow[4 * x + 1] / 255.0f;
+            float gainR = gainRow[4 * x + 2] / 255.0f;
 
 
             /* gainB = lut_sRGBToLinear(gainB);
@@ -2002,14 +2462,31 @@ void ImageLoader::CreateCpuMergedBitmap()
 
 
              // 应用增益公式
-            float R_main_temp = powf(2.0f, gainR);
-            float G_main_temp = powf(2.0f, gainG);
-            float B_main_temp = powf(2.0f, gainB);
+            if (applyGainMap)
+            {
+                float gainRValue = gainR;
+                float gainGValue = gainG;
+                float gainBValue = gainB;
 
+                if (gainRValue < 0.0f) gainRValue = 0.0f;
+                if (gainRValue > 1.0f) gainRValue = 1.0f;
+                if (gainGValue < 0.0f) gainGValue = 0.0f;
+                if (gainGValue > 1.0f) gainGValue = 1.0f;
+                if (gainBValue < 0.0f) gainBValue = 0.0f;
+                if (gainBValue > 1.0f) gainBValue = 1.0f;
 
-            R_main = R_main_temp * (R_main + eps) - eps;
-            G_main = G_main_temp * (G_main + eps) - eps;
-            B_main = B_main_temp * (B_main + eps) - eps;
+                float gainRLog = gainMapMin[0] + gainMapDelta[0] * powf(gainRValue, gainMapGamma[0]);
+                float gainGLog = gainMapMin[1] + gainMapDelta[1] * powf(gainGValue, gainMapGamma[1]);
+                float gainBLog = gainMapMin[2] + gainMapDelta[2] * powf(gainBValue, gainMapGamma[2]);
+
+                float gainRFactor = powf(2.0f, gainRLog);
+                float gainGFactor = powf(2.0f, gainGLog);
+                float gainBFactor = powf(2.0f, gainBLog);
+
+                R_main = (R_main + offsetSdr[0]) * gainRFactor - offsetHdr[0];
+                G_main = (G_main + offsetSdr[1]) * gainGFactor - offsetHdr[1];
+                B_main = (B_main + offsetSdr[2]) * gainBFactor - offsetHdr[2];
+            }
 
             // 写入目标像素（RGBA half）
             BYTE* targetPixel = rowStart + x * bytesPerPixel;

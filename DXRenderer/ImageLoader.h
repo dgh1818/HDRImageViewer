@@ -179,6 +179,8 @@ namespace DXRenderer
         void CreateCpuMergedBitmap();
         uint16_t FloatToHalf(float value);
         float sRGBToLinear(float color);
+        void ResetGainMapMetadata();
+        void TryUpdateGainMapMetadataFromBytes(const BYTE* data, size_t len);
 
         std::shared_ptr<DeviceResources>                        m_deviceResources;
 
@@ -197,6 +199,21 @@ namespace DXRenderer
         ImageInfo                                               m_imageInfo;
         ImageLoaderOptions                                      m_options;
         D2D1_SIMPLE_COLOR_PROFILE                               m_customOrDerivedColorProfile;
+
+        struct GainMapMetadata
+        {
+            bool hasMetadata = false;
+            bool baseRenditionIsHdr = false;
+            float gainMapMin[3] = {};
+            float gainMapMax[3] = {};
+            float gainMapGamma[3] = { 1.0f, 1.0f, 1.0f };
+            float offsetSdr[3] = {};
+            float offsetHdr[3] = {};
+            float hdrCapacityMin = 0.0f;
+            float hdrCapacityMax = 0.0f;
+        };
+
+        GainMapMetadata                                         m_gainMapMetadata;
 
         // Device-dependent. Everything here needs to be reset in ReleaseDeviceDependentResources.
         Microsoft::WRL::ComPtr<ID2D1ImageSource>                m_imageSource;
