@@ -1,5 +1,4 @@
 ﻿//*********************************************************
-//
 // HDRImageViewerRenderer
 //
 // Main manager of all native DirectX image rendering resources.
@@ -16,11 +15,11 @@
 #include "RenderOptions.h"
 #include "ImageLoader.h"
 #include "Matrix.h"
-#include <DirectXMath.h> // 用于 XMConvertFloatToHalf
+#include <DirectXMath.h> // Used for XMConvertFloatToHalf.
 #include <d2d1_1.h>
 
 #include <string>
-#include <vector> // 用于 std::vector
+#include <vector> // Used for std::vector.
 
 namespace DXRenderer
 {
@@ -106,10 +105,11 @@ namespace DXRenderer
         std::unique_ptr<ImageLoader>                            m_imageLoader;
 
         // WIC and Direct2D resources.
-        Microsoft::WRL::ComPtr<ID2D1TransformedImageSource>     m_loadedImage;
-        Microsoft::WRL::ComPtr<ID2D1TransformedImageSource>     m_loadedGainMap;
-        Microsoft::WRL::ComPtr<ID2D1TransformedImageSource>     m_loadedMergedImage;
+        Microsoft::WRL::ComPtr<ID2D1Image>                      m_loadedImage;
+        Microsoft::WRL::ComPtr<ID2D1Image>                      m_loadedGainMap;
+        Microsoft::WRL::ComPtr<ID2D1Image>                      m_loadedMergedImage;
         Microsoft::WRL::ComPtr<ID2D1Effect>                     m_gainmapLinearEffect;
+        Microsoft::WRL::ComPtr<ID2D1Effect>                     m_imageScaleEffect;
         Microsoft::WRL::ComPtr<ID2D1Effect>                     m_gainmapRefWhiteEffect;
         Microsoft::WRL::ComPtr<ID2D1Effect>                     m_gainMapMergeEffect;
         Microsoft::WRL::ComPtr<ID2D1Effect>                     m_colorManagementEffect;
@@ -388,8 +388,8 @@ namespace jpegR {
     void encodeISOJpeg(
         int width,
         int height,
-        std::vector<BYTE> sdrImage,   // 替换原来的BYTE* sdrData和int sdrSize
-        std::vector<BYTE> gainmapImage, // 替换原来的BYTE* gainmapData和int gainmapSize
+        std::vector<BYTE> sdrImage,   // Replaces BYTE* sdrData and int sdrSize.
+        std::vector<BYTE> gainmapImage, // Replaces BYTE* gainmapData and int gainmapSize.
         float maxContentBoost,
         float minContentBoost,
         float gamma,

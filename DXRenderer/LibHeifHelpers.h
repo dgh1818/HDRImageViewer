@@ -1,5 +1,6 @@
 #pragma once
 #include "pch.h"
+#include <cstring>
 
 namespace DXRenderer
 {
@@ -47,6 +48,20 @@ namespace DXRenderer
     public:
         ~CHeifAuxType() { if (ptr) free((void*)ptr); }
         bool IsAppleHdrGainMap() { return strcmp(ptr, "urn:com:apple:photo:2020:aux:hdrgainmap") == 0; }
+        bool IsIsoHdrGainMap()
+        {
+            if (!ptr)
+            {
+                return false;
+            }
+
+            if (strcmp(ptr, "urn:iso:std:iso:ts:21496:-1:aux:hdrgainmap") == 0)
+            {
+                return true;
+            }
+
+            return strstr(ptr, "iso:std:iso:ts:21496") != nullptr && strstr(ptr, "gainmap") != nullptr;
+        }
         const char* ptr = nullptr;
     };
 }

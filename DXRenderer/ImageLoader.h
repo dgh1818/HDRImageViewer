@@ -99,6 +99,8 @@ namespace DXRenderer
 
         ID2D1TransformedImageSource* GetLoadedImage(float zoom, bool selectAppleHdrGainMap);
         ID2D1TransformedImageSource* GetMergedImage(float zoom, bool selectAppleHdrGainMap);
+        ID2D1Image* GetLoadedImageSource(bool selectAppleHdrGainMap);
+        ID2D1Image* GetMergedImageSource();
 
         ID2D1ColorContext* GetImageColorContext();
         ImageInfo GetImageInfo();
@@ -171,7 +173,8 @@ namespace DXRenderer
         bool CheckCanDecode(_In_ IWICBitmapFrameDecode* frame);
         void CreateHeifHdr10CpuResources(_In_ IWICBitmapSource* source);
         void CreateHeifHdr10GpuResources();
-        bool TryLoadAppleHdrGainMapHeic(_In_ IStream* imageStream);
+        void CreateHeifSdrGpuResources();
+        int TryLoadHdrGainMapHeic(_In_ IStream* imageStream);
         bool TryLoadAppleHdrGainMapJpegMpo(_In_ IStream* imageStream, _In_ IWICBitmapFrameDecode* frame);
 
         int TryLoadCuvaHdrGainMapJpegMpo(_In_ IStream* imageStream, _In_ IWICBitmapFrameDecode* frame);
@@ -217,6 +220,7 @@ namespace DXRenderer
 
         // Device-dependent. Everything here needs to be reset in ReleaseDeviceDependentResources.
         Microsoft::WRL::ComPtr<ID2D1ImageSource>                m_imageSource;
+        Microsoft::WRL::ComPtr<ID2D1Bitmap1>                    m_heifBitmap;
         Microsoft::WRL::ComPtr<ID2D1ImageSource>                m_hdrGainMapSource;
         Microsoft::WRL::ComPtr<ID2D1ImageSource>                m_mergedSource;
         Microsoft::WRL::ComPtr<ID2D1ColorContext>               m_colorContext;

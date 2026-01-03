@@ -857,6 +857,16 @@ namespace HDRImageViewerCS
                 gainmapType = 3;
                 gainmapLabel = "ISO";
             }
+            else if (imageInfo.hasIsoHeicHdrGainMap)
+            {
+                gainmapType = 5;
+                gainmapLabel = "ISO HEIC";
+            }
+            else if (imageInfo.hasAppleHeicHdrGainMap)
+            {
+                gainmapType = 6;
+                gainmapLabel = "Apple HEIC";
+            }
             else if (imageInfo.hasAppleHdrGainMap)
             {
                 gainmapType = 4;

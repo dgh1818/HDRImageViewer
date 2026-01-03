@@ -7,6 +7,7 @@
 #include <Windows.h>
 #include <cstdlib>
 #include <cstring>
+#include <unordered_map>
 
 using namespace DXRenderer;
 
@@ -476,9 +477,78 @@ void ImageLoader::ResetGainMapMetadata()
     m_gainMapMetadata.hdrCapacityMax = 4.0f;
 }
 
-/// <summary>
-/// Performs CPU-side decoding of an image using WIC and reads key image parameters.
-/// </summary>
+static bool IsHeifHdrTransferFromStream(IStream* imageStream)
+{
+    if (!imageStream)
+    {
+        return false;
+    }
+
+    STATSTG stats = {};
+    if (FAILED(imageStream->Stat(&stats, STATFLAG_NONAME)))
+    {
+        return false;
+    }
+
+    const size_t sizeBytes = static_cast<size_t>(stats.cbSize.QuadPart);
+    if (sizeBytes != stats.cbSize.QuadPart || sizeBytes == 0)
+    {
+        return false;
+    }
+
+    std::vector<byte> fileBuf;
+    fileBuf.resize(sizeBytes);
+
+    LARGE_INTEGER zero = {};
+    if (FAILED(imageStream->Seek(zero, STREAM_SEEK_SET, nullptr)))
+    {
+        return false;
+    }
+
+    ULONG cbRead = 0;
+    if (FAILED(imageStream->Read(fileBuf.data(), static_cast<ULONG>(fileBuf.size()), &cbRead)))
+    {
+        return false;
+    }
+
+    if (cbRead != fileBuf.size())
+    {
+        return false;
+    }
+
+    CHeifContext ctx;
+    heif_error herr = heif_context_read_from_memory_without_copy(ctx.ptr, fileBuf.data(), fileBuf.size(), nullptr);
+    if (herr.code != heif_error_code::heif_error_Ok)
+    {
+        return false;
+    }
+
+    CHeifHandle mainHandle;
+    herr = heif_context_get_primary_image_handle(ctx.ptr, &mainHandle.ptr);
+    if (herr.code != heif_error_code::heif_error_Ok)
+    {
+        return false;
+    }
+
+    heif_color_profile_nclx* nclx = nullptr;
+    herr = heif_image_handle_get_nclx_color_profile(mainHandle.ptr, &nclx);
+    if (herr.code != heif_error_code::heif_error_Ok || !nclx)
+    {
+        if (nclx)
+        {
+            heif_nclx_color_profile_free(nclx);
+        }
+        return false;
+    }
+
+    bool isHdrTransfer =
+        nclx->transfer_characteristics == heif_transfer_characteristic_ITU_R_BT_2100_0_PQ ||
+        nclx->transfer_characteristics == heif_transfer_characteristic_ITU_R_BT_2100_0_HLG;
+
+    heif_nclx_color_profile_free(nclx);
+    return isHdrTransfer;
+}
+
 ImageInfo ImageLoader::LoadImageFromWic(_In_ IStream* imageStream)
 {
     LoadImageFromWicInt(imageStream);
@@ -514,31 +584,41 @@ void ImageLoader::LoadImageFromWicInt(_In_ IStream* imageStream)
     ResetGainMapMetadata();
     m_imageInfo.hasHdrGainMapHeadroom = false;
     m_imageInfo.hdrGainMapHeadroom = 0.0f;
+    m_imageInfo.hasIsoHeicHdrGainMap = false;
+    m_imageInfo.hasAppleHeicHdrGainMap = false;
 
     // Perform initial detection and handling of special case WIC decoders.
     if (fmt == GUID_ContainerFormatHeif)
     {
         m_imageInfo.isHeif = true;
 
-        // HEVC codec is not always installed on the system.
-        IFRIMG(CheckCanDecode(frame.Get()) == true ? S_OK : E_FAIL);
+        // Some HEIF decoders do not support scaler-based decode checks.
+
+        bool decoderSupportsHdr10 = false;
 
         // HEIF/HEVC supports GUID_WICPixelFormat32bppR10G10B10A2HDR10.
         // We must specifically detect and request HDR10 via IWICBitmapSourceTransform.
         ComPtr<IWICBitmapSourceTransform> sourceTransform;
-        IFRIMG(frame->QueryInterface(IID_PPV_ARGS(&sourceTransform)));
-
-        GUID checkHDR10Fmt = GUID_WICPixelFormat32bppR10G10B10A2HDR10;
-        IFRIMG(sourceTransform->GetClosestPixelFormat(&checkHDR10Fmt));
-
-        if (checkHDR10Fmt == GUID_WICPixelFormat32bppR10G10B10A2HDR10 &&
-            m_imageInfo.isHeif == true)
+        if (SUCCEEDED(frame->QueryInterface(IID_PPV_ARGS(&sourceTransform))))
         {
-            m_imageInfo.forceBT2100ColorSpace = true;
+            GUID checkHDR10Fmt = GUID_WICPixelFormat32bppR10G10B10A2HDR10;
+            if (SUCCEEDED(sourceTransform->GetClosestPixelFormat(&checkHDR10Fmt)) &&
+                checkHDR10Fmt == GUID_WICPixelFormat32bppR10G10B10A2HDR10)
+            {
+                decoderSupportsHdr10 = true;
+            }
         }
 
         // NOTE: Pixel resolution check can't be done until the main image has been decoded (LoadImageCommon).
-        m_imageInfo.hasAppleHdrGainMap = TryLoadAppleHdrGainMapHeic(imageStream);
+        int gainmapType = TryLoadHdrGainMapHeic(imageStream);
+        m_imageInfo.hasAppleHdrGainMap = false;
+        m_imageInfo.hasIsoHeicHdrGainMap = gainmapType == 5;
+        m_imageInfo.hasAppleHeicHdrGainMap = gainmapType == 6;
+
+        bool hasHdrTransfer = IsHeifHdrTransferFromStream(imageStream);
+        bool baseIsHdr = (gainmapType != 0) && m_gainMapMetadata.baseRenditionIsHdr;
+        m_imageInfo.forceBT2100ColorSpace = decoderSupportsHdr10 && (hasHdrTransfer || baseIsHdr);
+
     }
     else if (fmt == GUID_ContainerFormatWmp)
     {
@@ -564,21 +644,19 @@ void ImageLoader::LoadImageFromWicInt(_In_ IStream* imageStream)
             gainmapType = TryLoadCuvaHdrGainMapJpegMpo(imageStream, frame.Get());
         }
 
-        {
-            wchar_t buf[64] = {};
-            swprintf(buf, ARRAYSIZE(buf), L"gainmapType = %d\n", gainmapType);
-            OutputDebugString(buf);
-        }
-        std::cout << "gainmapType = " << gainmapType << std::endl;
 
         m_imageInfo.hasCuvaHdrGainMap = gainmapType == 1;
         m_imageInfo.hasHuaweiIsoJpegHdrGainMap = gainmapType == 2;
         m_imageInfo.hasIsoJpegHdrGainMap = gainmapType == 3;
 
         m_imageInfo.hasAppleHdrGainMap = gainmapType != 0;
-        if (!m_imageInfo.hasAppleHdrGainMap) {
-            gainmapType = 4;
-            m_imageInfo.hasAppleHdrGainMap = TryLoadAppleHdrGainMapJpegMpo(imageStream, frame.Get());
+        if (!m_imageInfo.hasAppleHdrGainMap)
+        {
+            if (TryLoadAppleHdrGainMapJpegMpo(imageStream, frame.Get()))
+            {
+                gainmapType = 4;
+                m_imageInfo.hasAppleHdrGainMap = true;
+            }
         }
         
         if(m_imageInfo.hasAppleHdrGainMap) {
@@ -617,6 +695,8 @@ void ImageLoader::LoadImageFromDirectXTexInt(String^ filename, String^ extension
     ResetGainMapMetadata();
     m_imageInfo.hasHdrGainMapHeadroom = false;
     m_imageInfo.hdrGainMapHeadroom = 0.0f;
+    m_imageInfo.hasIsoHeicHdrGainMap = false;
+    m_imageInfo.hasAppleHeicHdrGainMap = false;
 
     ComPtr<IWICBitmapSource> decodedSource;
 
@@ -744,6 +824,8 @@ void ImageLoader::LoadImageCommon(_In_ IWICBitmapSource* source)
     PopulatePixelFormatInfo(m_imageInfo, imageFmt);
     PopulateImageInfoACKind(m_imageInfo, source);
 
+    
+
     UINT width = 0, height = 0;
     IFRIMG(source->GetSize(&width, &height));
     m_imageInfo.pixelSize = Size(static_cast<float>(width), static_cast<float>(height));
@@ -790,7 +872,12 @@ void ImageLoader::LoadImageCommon(_In_ IWICBitmapSource* source)
                                                  // is possible to further optimize this for memory usage.
         }
 
-        if (m_imageInfo.hasAppleHdrGainMap == true) {
+        if (m_imageInfo.isHeif == true && m_imageInfo.forceBT2100ColorSpace == false)
+        {
+            fmt = GUID_WICPixelFormat32bppPBGRA;
+        }
+
+        if (m_imageInfo.hasAppleHdrGainMap == true || m_imageInfo.hasIsoHeicHdrGainMap == true || m_imageInfo.hasAppleHeicHdrGainMap == true) {
             UINT mapwidth = 0, mapheight = 0;
             IFRIMG(m_appleHdrGainMap.wicSource->GetSize(&mapwidth, &mapheight));
             m_imageInfo.gainMapPixelSize = Size(static_cast<float>(mapwidth), static_cast<float>(mapheight));
@@ -817,7 +904,7 @@ void ImageLoader::LoadImageCommon(_In_ IWICBitmapSource* source)
 
     m_imageInfo.isValid = true;
 
-    if (m_imageInfo.hasAppleHdrGainMap == true) {
+    if (m_imageInfo.hasAppleHdrGainMap == true || m_imageInfo.hasIsoHeicHdrGainMap == true || m_imageInfo.hasAppleHeicHdrGainMap == true) {
         CreateCpuMergedBitmap();
     }
 }
@@ -933,39 +1020,700 @@ void ImageLoader::CreateHeifHdr10GpuResources()
         D2D1_IMAGE_SOURCE_FROM_DXGI_OPTIONS_NONE,
         &m_imageSource));
 }
+void ImageLoader::CreateHeifSdrGpuResources()
+{
+
+    auto context = m_deviceResources->GetD2DDeviceContext();
+    auto wicFactory = m_deviceResources->GetWicImagingFactory();
+
+    UINT width = 0, height = 0;
+    IFRIMG(m_wicCachedSource->GetSize(&width, &height));
+
+    WICPixelFormatGUID srcFmt = {};
+    IFRIMG(m_wicCachedSource->GetPixelFormat(&srcFmt));
+
+    IWICBitmapSource* source = m_wicCachedSource.Get();
+    ComPtr<IWICFormatConverter> converter;
+    if (srcFmt != GUID_WICPixelFormat32bppPBGRA)
+    {
+        IFRIMG(wicFactory->CreateFormatConverter(&converter));
+        IFRIMG(converter->Initialize(
+            source,
+            GUID_WICPixelFormat32bppPBGRA,
+            WICBitmapDitherTypeNone,
+            nullptr,
+            0.0f,
+            WICBitmapPaletteTypeCustom));
+        source = converter.Get();
+    }
+
+    size_t stride = static_cast<size_t>(width) * 4;
+    size_t bufferSize = stride * static_cast<size_t>(height);
+    IFRIMG(bufferSize <= UINT_MAX ? S_OK : E_FAIL);
+
+    std::vector<BYTE> pixels;
+    pixels.resize(bufferSize);
+
+    IFRIMG(source->CopyPixels(
+        nullptr,
+        static_cast<UINT>(stride),
+        static_cast<UINT>(bufferSize),
+        pixels.data()));
+
+    D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_NONE,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+
+    IFRIMG(context->CreateBitmap(
+        D2D1::SizeU(width, height),
+        pixels.data(),
+        static_cast<UINT>(stride),
+        &props,
+        &m_heifBitmap));
+
+}
+
+
+namespace
+{
+    struct IsoItemInfo
+    {
+        std::string type;
+        std::string name;
+    };
+
+    struct IsoBoxHeader
+    {
+        size_t offset = 0;
+        uint64_t size = 0;
+        size_t headerSize = 0;
+        char type[5] = {};
+    };
+
+    static bool ReadU16BE(const BYTE* data, size_t len, size_t offset, uint16_t& outValue)
+    {
+        if (!data || offset + 2 > len)
+        {
+            return false;
+        }
+
+        outValue = static_cast<uint16_t>((data[offset] << 8) | data[offset + 1]);
+        return true;
+    }
+
+    static bool ReadU32BE(const BYTE* data, size_t len, size_t offset, uint32_t& outValue)
+    {
+        if (!data || offset + 4 > len)
+        {
+            return false;
+        }
+
+        outValue = (static_cast<uint32_t>(data[offset]) << 24) |
+            (static_cast<uint32_t>(data[offset + 1]) << 16) |
+            (static_cast<uint32_t>(data[offset + 2]) << 8) |
+            static_cast<uint32_t>(data[offset + 3]);
+        return true;
+    }
+
+    static bool ReadU64BE(const BYTE* data, size_t len, size_t offset, uint64_t& outValue)
+    {
+        uint32_t high = 0;
+        uint32_t low = 0;
+        if (!ReadU32BE(data, len, offset, high) || !ReadU32BE(data, len, offset + 4, low))
+        {
+            return false;
+        }
+
+        outValue = (static_cast<uint64_t>(high) << 32) | low;
+        return true;
+    }
+
+    static bool ReadIsoBoxHeader(const BYTE* data, size_t len, size_t offset, IsoBoxHeader& outBox)
+    {
+        if (!data || offset + 8 > len)
+        {
+            return false;
+        }
+
+        uint32_t size32 = 0;
+        if (!ReadU32BE(data, len, offset, size32))
+        {
+            return false;
+        }
+
+        std::memcpy(outBox.type, data + offset + 4, 4);
+        outBox.type[4] = '\0';
+
+        uint64_t boxSize = size32;
+        size_t headerSize = 8;
+        if (size32 == 1)
+        {
+            if (!ReadU64BE(data, len, offset + 8, boxSize))
+            {
+                return false;
+            }
+
+            headerSize = 16;
+        }
+        else if (size32 == 0)
+        {
+            boxSize = len - offset;
+        }
+
+        if (boxSize < headerSize || offset + boxSize > len)
+        {
+            return false;
+        }
+
+        outBox.offset = offset;
+        outBox.size = boxSize;
+        outBox.headerSize = headerSize;
+        return true;
+    }
+
+    static std::string ToLowerAscii(const std::string& value)
+    {
+        std::string out = value;
+        for (char& c : out)
+        {
+            if (c >= 'A' && c <= 'Z')
+            {
+                c = static_cast<char>(c - 'A' + 'a');
+            }
+        }
+        return out;
+    }
+
+    static bool ContainsAscii(const std::string& haystack, const char* needle)
+    {
+        if (!needle || !*needle)
+        {
+            return false;
+        }
+
+        std::string lowered = ToLowerAscii(haystack);
+        std::string needleLower = ToLowerAscii(needle);
+        return lowered.find(needleLower) != std::string::npos;
+    }
+
+    static void ParseIsoInfeBox(const BYTE* data, size_t len, const IsoBoxHeader& box, std::unordered_map<heif_item_id, IsoItemInfo>& itemInfo)
+    {
+        const size_t boxEnd = box.offset + static_cast<size_t>(box.size);
+        size_t cursor = box.offset + box.headerSize;
+        if (cursor + 4 > len || cursor + 4 > boxEnd)
+        {
+            return;
+        }
+
+        const uint8_t version = data[cursor];
+        cursor += 4; // version + flags
+
+        heif_item_id itemId = 0;
+        if (version == 2)
+        {
+            uint16_t id16 = 0;
+            if (!ReadU16BE(data, len, cursor, id16))
+            {
+                return;
+            }
+            itemId = static_cast<heif_item_id>(id16);
+            cursor += 2;
+            cursor += 2; // item_protection_index
+        }
+        else if (version == 3)
+        {
+            uint32_t id32 = 0;
+            if (!ReadU32BE(data, len, cursor, id32))
+            {
+                return;
+            }
+            itemId = static_cast<heif_item_id>(id32);
+            cursor += 4;
+            cursor += 2; // item_protection_index
+        }
+        else
+        {
+            return;
+        }
+
+        if (cursor + 4 > len || cursor + 4 > boxEnd)
+        {
+            return;
+        }
+
+        std::string type(reinterpret_cast<const char*>(data + cursor), 4);
+        cursor += 4;
+
+        size_t nameEnd = cursor;
+        while (nameEnd < boxEnd && data[nameEnd] != 0)
+        {
+            ++nameEnd;
+        }
+
+        std::string name;
+        if (nameEnd > cursor)
+        {
+            name.assign(reinterpret_cast<const char*>(data + cursor), nameEnd - cursor);
+        }
+
+        IsoItemInfo info = {};
+        info.type = ToLowerAscii(type);
+        info.name = ToLowerAscii(name);
+        itemInfo[itemId] = info;
+    }
+
+    static void ParseIsoIrefDimgBox(const BYTE* data, size_t len, const IsoBoxHeader& box, uint8_t version,
+        std::unordered_map<heif_item_id, std::vector<heif_item_id>>& dimgRefs)
+    {
+        const size_t boxEnd = box.offset + static_cast<size_t>(box.size);
+        size_t cursor = box.offset + box.headerSize;
+
+        while (cursor < boxEnd)
+        {
+            if (version == 0)
+            {
+                uint16_t fromId = 0;
+                uint16_t refCount = 0;
+                if (!ReadU16BE(data, len, cursor, fromId) || !ReadU16BE(data, len, cursor + 2, refCount))
+                {
+                    break;
+                }
+                cursor += 4;
+
+                if (cursor + static_cast<size_t>(refCount) * 2 > boxEnd)
+                {
+                    break;
+                }
+
+                auto& refs = dimgRefs[static_cast<heif_item_id>(fromId)];
+                for (uint16_t i = 0; i < refCount; ++i)
+                {
+                    uint16_t toId = 0;
+                    if (!ReadU16BE(data, len, cursor, toId))
+                    {
+                        return;
+                    }
+                    cursor += 2;
+                    refs.push_back(static_cast<heif_item_id>(toId));
+                }
+            }
+            else if (version == 1)
+            {
+                uint32_t fromId = 0;
+                uint16_t refCount = 0;
+                if (!ReadU32BE(data, len, cursor, fromId) || !ReadU16BE(data, len, cursor + 4, refCount))
+                {
+                    break;
+                }
+                cursor += 6;
+
+                if (cursor + static_cast<size_t>(refCount) * 4 > boxEnd)
+                {
+                    break;
+                }
+
+                auto& refs = dimgRefs[static_cast<heif_item_id>(fromId)];
+                for (uint16_t i = 0; i < refCount; ++i)
+                {
+                    uint32_t toId = 0;
+                    if (!ReadU32BE(data, len, cursor, toId))
+                    {
+                        return;
+                    }
+                    cursor += 4;
+                    refs.push_back(static_cast<heif_item_id>(toId));
+                }
+            }
+            else
+            {
+                break;
+            }
+        }
+    }
+
+    static bool TryFindIsoTmapGainMapItemId(const BYTE* data, size_t len, heif_item_id& outGainMapId)
+    {
+        outGainMapId = 0;
+        if (!data || len < 16)
+        {
+            return false;
+        }
+
+        heif_item_id primaryId = 0;
+        std::unordered_map<heif_item_id, IsoItemInfo> itemInfo;
+        std::unordered_map<heif_item_id, std::vector<heif_item_id>> dimgRefs;
+
+        size_t offset = 0;
+        while (offset + 8 <= len)
+        {
+            IsoBoxHeader box = {};
+            if (!ReadIsoBoxHeader(data, len, offset, box))
+            {
+                break;
+            }
+
+            if (std::memcmp(box.type, "meta", 4) == 0)
+            {
+                const size_t metaEnd = box.offset + static_cast<size_t>(box.size);
+                size_t childOffset = box.offset + box.headerSize;
+                if (childOffset + 4 <= metaEnd)
+                {
+                    childOffset += 4; // full box header
+                }
+
+                while (childOffset + 8 <= metaEnd)
+                {
+                    IsoBoxHeader child = {};
+                    if (!ReadIsoBoxHeader(data, len, childOffset, child))
+                    {
+                        break;
+                    }
+
+                    const size_t childEnd = child.offset + static_cast<size_t>(child.size);
+                    if (std::memcmp(child.type, "pitm", 4) == 0)
+                    {
+                        size_t cursor = child.offset + child.headerSize;
+                        if (cursor + 4 <= childEnd)
+                        {
+                            const uint8_t version = data[cursor];
+                            cursor += 4;
+                            if (version == 0)
+                            {
+                                uint16_t id16 = 0;
+                                if (ReadU16BE(data, len, cursor, id16))
+                                {
+                                    primaryId = static_cast<heif_item_id>(id16);
+                                }
+                            }
+                            else if (version == 1)
+                            {
+                                uint32_t id32 = 0;
+                                if (ReadU32BE(data, len, cursor, id32))
+                                {
+                                    primaryId = static_cast<heif_item_id>(id32);
+                                }
+                            }
+                        }
+                    }
+                    else if (std::memcmp(child.type, "iinf", 4) == 0)
+                    {
+                        size_t iinfCursor = child.offset + child.headerSize;
+                        if (iinfCursor + 4 <= childEnd)
+                        {
+                            const uint8_t version = data[iinfCursor];
+                            iinfCursor += 4;
+                            if (version == 0)
+                            {
+                                iinfCursor += 2;
+                            }
+                            else
+                            {
+                                iinfCursor += 4;
+                            }
+
+                            while (iinfCursor + 8 <= childEnd)
+                            {
+                                IsoBoxHeader infe = {};
+                                if (!ReadIsoBoxHeader(data, len, iinfCursor, infe))
+                                {
+                                    break;
+                                }
+
+                                if (std::memcmp(infe.type, "infe", 4) == 0)
+                                {
+                                    ParseIsoInfeBox(data, len, infe, itemInfo);
+                                }
+
+                                iinfCursor += static_cast<size_t>(infe.size);
+                            }
+                        }
+                    }
+                    else if (std::memcmp(child.type, "iref", 4) == 0)
+                    {
+                        size_t irefCursor = child.offset + child.headerSize;
+                        if (irefCursor + 4 <= childEnd)
+                        {
+                            const uint8_t version = data[irefCursor];
+                            irefCursor += 4;
+
+                            while (irefCursor + 8 <= childEnd)
+                            {
+                                IsoBoxHeader refBox = {};
+                                if (!ReadIsoBoxHeader(data, len, irefCursor, refBox))
+                                {
+                                    break;
+                                }
+
+                                if (std::memcmp(refBox.type, "dimg", 4) == 0)
+                                {
+                                    ParseIsoIrefDimgBox(data, len, refBox, version, dimgRefs);
+                                }
+
+                                irefCursor += static_cast<size_t>(refBox.size);
+                            }
+                        }
+                    }
+
+                    childOffset += static_cast<size_t>(child.size);
+                }
+            }
+
+            offset += static_cast<size_t>(box.size);
+        }
+
+        std::vector<heif_item_id> tmapItems;
+        for (const auto& entry : itemInfo)
+        {
+            if (entry.second.type == "tmap")
+            {
+                tmapItems.push_back(entry.first);
+            }
+        }
+
+        for (heif_item_id tmapId : tmapItems)
+        {
+            auto refsIt = dimgRefs.find(tmapId);
+            if (refsIt == dimgRefs.end())
+            {
+                continue;
+            }
+
+            const auto& refs = refsIt->second;
+            heif_item_id candidate = 0;
+            for (heif_item_id refId : refs)
+            {
+                auto infoIt = itemInfo.find(refId);
+                if (infoIt != itemInfo.end() && ContainsAscii(infoIt->second.name, "gain"))
+                {
+                    candidate = refId;
+                    break;
+                }
+            }
+
+            if (candidate == 0 && primaryId != 0)
+            {
+                for (heif_item_id refId : refs)
+                {
+                    if (refId != primaryId)
+                    {
+                        candidate = refId;
+                        break;
+                    }
+                }
+            }
+
+            if (candidate != 0)
+            {
+                outGainMapId = candidate;
+                return true;
+            }
+        }
+
+        return false;
+    }
+}
 
 /// <summary>
-/// Checks if the HEIC image contains an Apple HDR gainmap. If true, initializes the gainmap bitmap.
+/// Checks if the HEIC image contains an HDR gainmap. If true, initializes the gainmap bitmap.
 /// </summary>
 /// <param name="imageStream"></param>
-/// <returns></returns>
-bool ImageLoader::TryLoadAppleHdrGainMapHeic(IStream* imageStream)
+/// <returns>0 if none, 5 for ISO HDR, 6 for Apple HDR (HEIC).</returns>
+int ImageLoader::TryLoadHdrGainMapHeic(IStream* imageStream)
 {
+
     STATSTG stats = {};
     HRESULT hr = imageStream->Stat(&stats, STATFLAG_NONAME);
+    const bool hasStat = SUCCEEDED(hr);
+    if (!hasStat)
 
-    unsigned int sizeBytes = static_cast<unsigned int>(stats.cbSize.QuadPart);
-
-    // Image is too large, give up.
-    IFRF(sizeBytes != stats.cbSize.QuadPart ? E_FAIL : S_OK);
-
-    std::vector<byte> fileBuf(sizeBytes);
+    if (hasStat && stats.cbSize.QuadPart > UINT_MAX)
+    {
+        return 0;
+    }
 
     ULARGE_INTEGER seeked = {};
-    imageStream->Seek({}, STREAM_SEEK_SET, &seeked);
+    hr = imageStream->Seek({}, STREAM_SEEK_SET, &seeked);
+    if (FAILED(hr))
+    {
+        return 0;
+    }
 
-    ULONG cbRead = 0;
-    hr = imageStream->Read(fileBuf.data(), static_cast<ULONG>(fileBuf.size()), &cbRead);
+    const size_t kMaxHeifBytes = 512u * 1024u * 1024u;
+    std::vector<byte> fileBuf;
+    if (hasStat && stats.cbSize.QuadPart > 0 &&
+        stats.cbSize.QuadPart <= static_cast<ULONGLONG>(kMaxHeifBytes))
+    {
+        fileBuf.reserve(static_cast<size_t>(stats.cbSize.QuadPart));
+    }
+
+    const ULONG kChunkSize = 1024u * 1024u;
+    std::vector<byte> chunk(kChunkSize);
+    for (;;)
+    {
+        ULONG cbRead = 0;
+        hr = imageStream->Read(chunk.data(), kChunkSize, &cbRead);
+        if (FAILED(hr))
+        {
+            return 0;
+        }
+
+        if (cbRead == 0)
+        {
+            break;
+        }
+
+        if (fileBuf.size() + cbRead > kMaxHeifBytes)
+        {
+            return 0;
+        }
+
+        fileBuf.insert(fileBuf.end(), chunk.data(), chunk.data() + cbRead);
+    }
+
+    if (fileBuf.empty())
+    {
+        return 0;
+    }
+
+
+    imageStream->Seek({}, STREAM_SEEK_SET, nullptr);
 
     CHeifContext ctx;
-    IFRF(HEIFHR(heif_context_read_from_memory_without_copy(ctx.ptr, fileBuf.data(), fileBuf.size(), nullptr)));
+    heif_error herr = heif_context_read_from_memory_without_copy(ctx.ptr, fileBuf.data(), fileBuf.size(), nullptr);
+    if (herr.code != heif_error_code::heif_error_Ok)
+    {
+
+        CHeifContext ctxCopy;
+        herr = heif_context_read_from_memory(ctxCopy.ptr, fileBuf.data(), fileBuf.size(), nullptr);
+        if (herr.code != heif_error_code::heif_error_Ok)
+        {
+            return 0;
+        }
+
+        heif_context* tmp = ctx.ptr;
+        ctx.ptr = ctxCopy.ptr;
+        ctxCopy.ptr = tmp;
+    }
 
     CHeifHandle mainHandle;
-    IFRF(HEIFHR(heif_context_get_primary_image_handle(ctx.ptr, &mainHandle.ptr)));
+    herr = heif_context_get_primary_image_handle(ctx.ptr, &mainHandle.ptr);
+    if (herr.code != heif_error_code::heif_error_Ok)
+    {
+        return 0;
+    }
 
     int countAux = heif_image_handle_get_number_of_auxiliary_images(mainHandle.ptr, 0);
     std::vector<heif_item_id> auxIds(countAux);
     heif_image_handle_get_list_of_auxiliary_image_IDs(mainHandle.ptr, 0, auxIds.data(), static_cast<int>(auxIds.size()));
+
+    auto tryDecodeGainMapHandle = [&](heif_image_handle* handle) -> bool
+    {
+        if (!handle)
+        {
+            return false;
+        }
+
+        auto fact = m_deviceResources->GetWicImagingFactory();
+
+        auto createWicFromGray = [&](int width, int height, int stride, uint8_t* data) -> bool
+        {
+            ComPtr<IWICBitmap> bitmap;
+            if (FAILED(fact->CreateBitmapFromMemory(
+                width,
+                height,
+                GUID_WICPixelFormat8bppGray,
+                stride,
+                stride * height,
+                static_cast<BYTE*>(data),
+                &bitmap)))
+            {
+                return false;
+            }
+
+            ComPtr<IWICFormatConverter> fmt;
+            if (FAILED(fact->CreateFormatConverter(&fmt)))
+            {
+                return false;
+            }
+            if (FAILED(fmt->Initialize(bitmap.Get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0.0f, WICBitmapPaletteTypeCustom)))
+            {
+                return false;
+            }
+
+            return SUCCEEDED(fmt.As(&m_appleHdrGainMap.wicSource));
+        };
+
+        auto createWicFromRgb = [&](int width, int height, int stride, uint8_t* data) -> bool
+        {
+            ComPtr<IWICBitmap> bitmap;
+            if (FAILED(fact->CreateBitmapFromMemory(
+                width,
+                height,
+                GUID_WICPixelFormat24bppRGB,
+                stride,
+                stride * height,
+                static_cast<BYTE*>(data),
+                &bitmap)))
+            {
+                return false;
+            }
+
+            ComPtr<IWICFormatConverter> fmt;
+            if (FAILED(fact->CreateFormatConverter(&fmt)))
+            {
+                return false;
+            }
+            if (FAILED(fmt->Initialize(bitmap.Get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0.0f, WICBitmapPaletteTypeCustom)))
+            {
+                return false;
+            }
+
+            return SUCCEEDED(fmt.As(&m_appleHdrGainMap.wicSource));
+        };
+
+        heif_error decodeErr = heif_decode_image(handle, &m_appleHdrGainMap.ptr, heif_colorspace_monochrome, heif_chroma_monochrome, 0);
+        if (decodeErr.code == heif_error_code::heif_error_Ok)
+        {
+            int width = heif_image_get_primary_width(m_appleHdrGainMap.ptr);
+            int height = heif_image_get_primary_height(m_appleHdrGainMap.ptr);
+            int bitdepth = heif_image_get_bits_per_pixel_range(m_appleHdrGainMap.ptr, heif_channel_Y);
+
+
+            int stride = 0;
+            uint8_t* data = heif_image_get_plane(m_appleHdrGainMap.ptr, heif_channel_Y, &stride);
+
+            if (bitdepth == 8 && data != nullptr && createWicFromGray(width, height, stride, data))
+            {
+                return true;
+            }
+
+            if (m_appleHdrGainMap.ptr != nullptr)
+            {
+                heif_image_release(m_appleHdrGainMap.ptr);
+                m_appleHdrGainMap.ptr = nullptr;
+            }
+        }
+
+        decodeErr = heif_decode_image(handle, &m_appleHdrGainMap.ptr, heif_colorspace_RGB, heif_chroma_interleaved_RGB, 0);
+        if (decodeErr.code != heif_error_code::heif_error_Ok)
+        {
+            return false;
+        }
+
+        int width = heif_image_get_primary_width(m_appleHdrGainMap.ptr);
+        int height = heif_image_get_primary_height(m_appleHdrGainMap.ptr);
+        int bitdepth = heif_image_get_bits_per_pixel_range(m_appleHdrGainMap.ptr, heif_channel_interleaved);
+        int stride = 0;
+        uint8_t* data = heif_image_get_plane(m_appleHdrGainMap.ptr, heif_channel_interleaved, &stride);
+
+
+        if (bitdepth != 8 || data == nullptr)
+        {
+            return false;
+        }
+
+        return createWicFromRgb(width, height, stride, data);
+    };
 
     for (auto i : auxIds)
     {
@@ -975,45 +1723,50 @@ bool ImageLoader::TryLoadAppleHdrGainMapHeic(IStream* imageStream)
         CHeifAuxType type;
         IFRF(HEIFHR(heif_image_handle_get_auxiliary_type(auxHandle.ptr, &type.ptr)));
 
-        if (type.IsAppleHdrGainMap())
+        const bool isAppleGainMap = type.IsAppleHdrGainMap();
+        const bool isIsoGainMap = type.IsIsoHdrGainMap();
+
+        if (isAppleGainMap || isIsoGainMap)
         {
-            IFRF(HEIFHR(heif_decode_image(auxHandle.ptr, &m_appleHdrGainMap.ptr, heif_colorspace_monochrome, heif_chroma_monochrome, 0)));
+            if (!tryDecodeGainMapHandle(auxHandle.ptr))
+            {
+                return 0;
+            }
 
-            int width = heif_image_get_primary_width(m_appleHdrGainMap.ptr);
-            int height = heif_image_get_primary_height(m_appleHdrGainMap.ptr);
-            int bitdepth = heif_image_get_bits_per_pixel_range(m_appleHdrGainMap.ptr, heif_channel_Y);
+            if (!fileBuf.empty())
+            {
+                TryUpdateGainMapMetadataFromBytes(reinterpret_cast<const BYTE*>(fileBuf.data()), fileBuf.size());
+            }
 
-            if (bitdepth != 8) return false; // Defer checking main image resolution until it is available later in decode process.
-
-            int stride = 0;
-            uint8_t* data = heif_image_get_plane(m_appleHdrGainMap.ptr, heif_channel_Y, &stride);
-
-            auto fact = m_deviceResources->GetWicImagingFactory();
-
-            // Memory and object lifetime is synchronized with CHeifImageWithWicBitmap.
-            ComPtr<IWICBitmap> bitmap;
-
-            IFRF(fact->CreateBitmapFromMemory(
-                width,
-                height,
-                GUID_WICPixelFormat8bppGray,
-                stride,
-                stride * height,
-                static_cast<BYTE *>(data),
-                &bitmap));
-
-            ComPtr<IWICFormatConverter> fmt;
-            IFRF(fact->CreateFormatConverter(&fmt));
-            IFRF(fmt->Initialize(bitmap.Get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0.0f, WICBitmapPaletteTypeCustom));
-
-            IFRF(fmt.As(&m_appleHdrGainMap.wicSource));
-
-            // Immediately return once we have a gain map.
-            return true;
+            return isAppleGainMap ? 6 : 5;
         }
     }
 
-    return false;
+    heif_item_id gainMapItemId = 0;
+    if (TryFindIsoTmapGainMapItemId(reinterpret_cast<const BYTE*>(fileBuf.data()), fileBuf.size(), gainMapItemId))
+    {
+
+        CHeifHandle gainHandle;
+        heif_error herr = heif_context_get_image_handle(ctx.ptr, gainMapItemId, &gainHandle.ptr);
+        if (herr.code != heif_error_code::heif_error_Ok)
+        {
+            return 0;
+        }
+
+        if (!tryDecodeGainMapHandle(gainHandle.ptr))
+        {
+            return 0;
+        }
+
+        if (!fileBuf.empty())
+        {
+            TryUpdateGainMapMetadataFromBytes(reinterpret_cast<const BYTE*>(fileBuf.data()), fileBuf.size());
+        }
+
+        return 5;
+    }
+
+    return 0;
 }
 
 /// <summary>
@@ -1045,9 +1798,6 @@ int ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapFr
     LARGE_INTEGER zero = {};
     imageStream->Seek(zero, STREAM_SEEK_SET, nullptr);
     
-    BYTE byte;
-    ULONG bytesRead = 0;
-    int i = 0;
 
     jpegData.resize(stats.cbSize.QuadPart);
     ULONG read = 0;
@@ -1079,11 +1829,11 @@ int ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapFr
     {
         if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xE1) {
 
-            // 验证EXIF签名
+            // Validate EXIF signature.
             if (i + 9 < len &&
                 memcmp(&jpegData[i + 4], exif_signature, sizeof(exif_signature)) == 0) {
 
-                // 设置EXIF位置和大小
+                // Set EXIF position.
                 exif_pos = i + 4;
                 exif_result.exif_pos = i + 4;
 
@@ -1109,6 +1859,24 @@ int ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapFr
             thumbnailStart = i + 2;
             break;
         }
+    }
+
+    if (firstStart < 0)
+    {
+        for (int i = 0; i < len - 1; ++i)
+        {
+            if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD8)
+            {
+                firstStart = i;
+                thumbnailStart = i + 2;
+                break;
+            }
+        }
+    }
+
+    if (firstStart < 0)
+    {
+        return 0;
     }
 
     for (int i = firstStart+ 5; i < len - 1; ++i)
@@ -1225,14 +1993,14 @@ int ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapFr
     GUID pixelFormat = {};
     hr = gainmapFrame->GetPixelFormat(&pixelFormat);
 
-    // 转换为带预乘alpha的32位PBGRA格式
+    // Convert to 32bpp PBGRA with premultiplied alpha.
     hr = fmt->Initialize(
-        gainmapFrame.Get(),              // 输入帧
-        GUID_WICPixelFormat32bppPBGRA,   // 目标格式
-        WICBitmapDitherTypeNone,         // 无抖动
-        nullptr,                         // 无调色板
-        0.0f,                            // alpha阈值
-        WICBitmapPaletteTypeCustom       // 调色板类型
+        gainmapFrame.Get(),
+        GUID_WICPixelFormat32bppPBGRA,   // Target format.
+        WICBitmapDitherTypeNone,         // No dithering.
+        nullptr,                         // No palette.
+        0.0f,                            // Alpha threshold.
+        WICBitmapPaletteTypeCustom       // Custom palette.
     );
 
     IFRF(fmt.As(&m_appleHdrGainMap.wicSource));
@@ -1808,6 +2576,10 @@ void ImageLoader::CreateDeviceDependentResourcesInternal()
     {
         CreateHeifHdr10GpuResources();
     }
+    else if (m_imageInfo.isHeif == true)
+    {
+        CreateHeifSdrGpuResources();
+    }
     else
     {
         ComPtr<ID2D1ImageSourceFromWic> wicImageSource;
@@ -1815,7 +2587,7 @@ void ImageLoader::CreateDeviceDependentResourcesInternal()
         IFRIMG(wicImageSource.As(&m_imageSource));
     }
 
-    if (m_imageInfo.hasAppleHdrGainMap)
+    if (m_imageInfo.hasAppleHdrGainMap || m_imageInfo.hasIsoHeicHdrGainMap || m_imageInfo.hasAppleHeicHdrGainMap)
     {
         ComPtr<ID2D1ImageSourceFromWic> wicGainMapSource;
         IFRIMG(context->CreateImageSourceFromWic(m_appleHdrGainMap.wicSource.Get(), &wicGainMapSource));
@@ -1873,9 +2645,14 @@ ID2D1TransformedImageSource* ImageLoader::GetLoadedImage(float zoom, bool select
 
     if (selectAppleHdrGainMap == true)
     {
-        if (m_imageInfo.hasAppleHdrGainMap == false) return nullptr;
+        if (m_imageInfo.hasAppleHdrGainMap == false && m_imageInfo.hasIsoHeicHdrGainMap == false && m_imageInfo.hasAppleHeicHdrGainMap == false) return nullptr;
         zoom *= m_imageInfo.pixelSize.Width / m_imageInfo.gainMapPixelSize.Width; // Typically is 2x.
         source = m_hdrGainMapSource.Get();
+    }
+
+    if (!source)
+    {
+        return nullptr;
     }
 
     // When using ID2D1ImageSource, the recommend method of scaling is to use
@@ -1891,12 +2668,45 @@ ID2D1TransformedImageSource* ImageLoader::GetLoadedImage(float zoom, bool select
 
     ComPtr<ID2D1TransformedImageSource> output;
 
-    IFT(m_deviceResources->GetD2DDeviceContext()->CreateTransformedImageSource(
+    HRESULT hr = m_deviceResources->GetD2DDeviceContext()->CreateTransformedImageSource(
         source,
         &props,
-        &output));
+        &output);
+    if (FAILED(hr))
+    {
+        return nullptr;
+    }
 
     return output.Detach();
+}
+
+ID2D1Image* ImageLoader::GetLoadedImageSource(bool selectAppleHdrGainMap)
+{
+    EnforceStates(1, ImageLoaderState::LoadingSucceeded);
+
+    if (selectAppleHdrGainMap == true)
+    {
+        if (m_imageInfo.hasAppleHdrGainMap == false && m_imageInfo.hasIsoHeicHdrGainMap == false && m_imageInfo.hasAppleHeicHdrGainMap == false)
+        {
+            return nullptr;
+        }
+
+        return m_hdrGainMapSource.Get();
+    }
+
+    if (m_heifBitmap)
+    {
+        return m_heifBitmap.Get();
+    }
+
+    return m_imageSource.Get();
+}
+
+ID2D1Image* ImageLoader::GetMergedImageSource()
+{
+    EnforceStates(1, ImageLoaderState::LoadingSucceeded);
+
+    return m_mergedSource.Get();
 }
 
 ID2D1TransformedImageSource* ImageLoader::GetMergedImage(float zoom, bool selectAppleHdrGainMap)
@@ -1907,11 +2717,16 @@ ID2D1TransformedImageSource* ImageLoader::GetMergedImage(float zoom, bool select
 
     //ComPtr<ID2D1ImageSourceFromWic> wicImageSource_2;
     //HRESULT hr = context->CreateImageSourceFromWic(
-    //    m_cpuMergedWICBitmapSource.Get(),  // 您的 IWICBitmapSource
+    //    m_cpuMergedWICBitmapSource.Get(),  // IWICBitmapSource
     //    &wicImageSource_2);
     //ID2D1ImageSource* source = wicImageSource_2.Get();
 
     ID2D1ImageSource* source = m_mergedSource.Get();
+
+    if (!source)
+    {
+        return nullptr;
+    }
 
     // When using ID2D1ImageSource, the recommend method of scaling is to use
     // ID2D1TransformedImageSource. It is inexpensive to recreate this object.
@@ -1926,10 +2741,14 @@ ID2D1TransformedImageSource* ImageLoader::GetMergedImage(float zoom, bool select
 
     ComPtr<ID2D1TransformedImageSource> output;
 
-    IFT(m_deviceResources->GetD2DDeviceContext()->CreateTransformedImageSource(
+    HRESULT hr = m_deviceResources->GetD2DDeviceContext()->CreateTransformedImageSource(
         source,
         &props,
-        &output));
+        &output);
+    if (FAILED(hr))
+    {
+        return nullptr;
+    }
 
     return output.Detach();
 }
@@ -2013,6 +2832,7 @@ void ImageLoader::ReleaseDeviceDependentResources()
         m_state = ImageLoaderState::NeedDeviceResources;
 
         m_imageSource.Reset();
+        m_heifBitmap.Reset();
         m_colorContext.Reset();
         m_hdrGainMapSource.Reset();
         break;
@@ -2063,7 +2883,7 @@ void ImageLoader::PopulateImageInfoACKind(ImageInfo& info, _In_ IWICBitmapSource
         m_imageInfo.imageKind = AdvancedColorKind::HighDynamicRange;
     }
 
-    if (m_imageInfo.hasAppleHdrGainMap == true)
+    if (m_imageInfo.hasAppleHdrGainMap == true || m_imageInfo.hasIsoHeicHdrGainMap == true || m_imageInfo.hasAppleHeicHdrGainMap == true)
     {
         m_imageInfo.imageKind = AdvancedColorKind::HighDynamicRange;
     }
@@ -2125,7 +2945,7 @@ void ImageLoader::PopulatePixelFormatInfo(ImageInfo& info, WICPixelFormatGUID fo
 
         info.isFloat = (WICPixelFormatNumericRepresentationFloat == formatNumber) ? true : false;
 
-        if (info.hasAppleHdrGainMap) {
+        if (info.hasAppleHdrGainMap || info.hasIsoHeicHdrGainMap || info.hasAppleHeicHdrGainMap) {
             info.bitsPerChannel = 10;
             info.bitsPerPixel = 32;
             info.isFloat = false;
@@ -2255,7 +3075,6 @@ bool ImageLoader::CheckCanDecode(_In_ IWICBitmapFrameDecode* frame)
 
 void ImageLoader::CreateCpuMergedBitmap()
 {
-    OutputDebugString(L"CreateCpuMergedBitmap: Start\n");
     ComPtr<IWICImagingFactory2> wicFactory;
     CoCreateInstance(
         CLSID_WICImagingFactory2,
@@ -2271,7 +3090,7 @@ void ImageLoader::CreateCpuMergedBitmap()
 
     auto context = m_deviceResources->GetD2DDeviceContext();
 
-    // 3) 再从 ImageSourceFromWic 拿到真正的 IWICBitmapSource
+    // 3) Get the IWICBitmapSource from ImageSourceFromWic.
     ComPtr<IWICBitmapSource> mainSrc;
     ComPtr<IWICBitmapSource> gainSrc;
     mainSrc= m_wicCachedSource;
@@ -2280,15 +3099,24 @@ void ImageLoader::CreateCpuMergedBitmap()
     UINT width = 0, height = 0;
     mainSrc->GetSize(&width, &height);
 
+    UINT gainWidth = 0, gainHeight = 0;
+    gainSrc->GetSize(&gainWidth, &gainHeight);
+
+    if (width == 0 || height == 0 || gainWidth == 0 || gainHeight == 0)
+    {
+        return;
+    }
+
     const UINT bytesPerPixel_main = 4;
     const UINT bytesPerPixel_gain = 4;
     UINT strideMain = width * bytesPerPixel_main;
-    UINT strideGain = width * bytesPerPixel_gain;
+    UINT strideGain = gainWidth * bytesPerPixel_gain;
     UINT bufferSizeMain = strideMain * height;
-    UINT bufferSizeGain = strideGain * height;
+    UINT bufferSizeGain = strideGain * gainHeight;
     std::vector<BYTE> bufferMain(bufferSizeMain);
     std::vector<BYTE> bufferGain(bufferSizeGain);
     WICRect rect = { 0, 0, static_cast<INT>(width), static_cast<INT>(height) };
+    WICRect rectGain = { 0, 0, static_cast<INT>(gainWidth), static_cast<INT>(gainHeight) };
 
     IFT(mainSrc->CopyPixels(
         &rect,
@@ -2296,21 +3124,21 @@ void ImageLoader::CreateCpuMergedBitmap()
         bufferSizeMain,
         bufferMain.data()));
 
-    ComPtr<IWICBitmapScaler> scaler;
-    IFT(wicFactory->CreateBitmapScaler(&scaler));
-    //IFT(scaler->Initialize(gainSrc.Get(), width, height, WICBitmapInterpolationModeLinear));     //牺牲效果优化速度
-    IFT(scaler->Initialize(gainSrc.Get(), width, height, WICBitmapInterpolationModeNearestNeighbor));
-    IFT(scaler->CopyPixels(&rect, strideGain, bufferSizeGain, bufferGain.data()));
+    IFT(gainSrc->CopyPixels(
+        &rectGain,
+        strideGain,
+        bufferSizeGain,
+        bufferGain.data()));
 
     ComPtr<IWICBitmap> outBitmap;
     IFT(wicFactory->CreateBitmap(
         width, height,
-        //GUID_WICPixelFormat64bppRGBAHalf, // 改为 RGBA1010102 格式
+        // GUID_WICPixelFormat64bppRGBAHalf, // Change to RGBA1010102 format.
         GUID_WICPixelFormat64bppPRGBAHalf,
         WICBitmapCacheOnLoad,
         &outBitmap));
 
-    //// 2) 锁定 FP16 位图进行写入
+    // 2) Lock the FP16 bitmap for writing.
     ComPtr<IWICBitmapLock> lockOut;
     IFT(outBitmap->Lock(&rect, WICBitmapLockWrite, &lockOut));
 
@@ -2326,11 +3154,10 @@ void ImageLoader::CreateCpuMergedBitmap()
 
     if (dataOut == nullptr)
     {
-        OutputDebugString(L"Error: GetDataPointer returned NULL data pointer\n");
         return;
     }
 
-    //// 逐像素计算写回 outBitmap
+    // Per-pixel compute and write into outBitmap.
     float gainMapMin[3] = { m_gainMapMetadata.gainMapMin[0], m_gainMapMetadata.gainMapMin[1], m_gainMapMetadata.gainMapMin[2] };
     float gainMapMax[3] = { m_gainMapMetadata.gainMapMax[0], m_gainMapMetadata.gainMapMax[1], m_gainMapMetadata.gainMapMax[2] };
     float gainMapGamma[3] = { m_gainMapMetadata.gainMapGamma[0], m_gainMapMetadata.gainMapGamma[1], m_gainMapMetadata.gainMapGamma[2] };
@@ -2365,16 +3192,13 @@ void ImageLoader::CreateCpuMergedBitmap()
         gainMapDelta[c] = gainMapMax[c] - gainMapMin[c];
     }
 
-    OutputDebugString(L"Processing pixels...\n");
     //for (UINT y = 0; y < height; y++)
     //{
     //    if (y * strideOut >= bufferSizeOut)
     //    {
     //        wchar_t errorMsg[256];
-    //        swprintf_s(errorMsg, L"Row %d exceeds buffer size! BufferSize=%u, Offset=%u\n",
     //            y, bufferSizeOut, y * strideOut);
-    //        OutputDebugString(errorMsg);
-    //        break; // 跳出循环避免崩溃
+    //        break; // Break to avoid a crash.
     //    }
 
     //    BYTE* mainRow = bufferMain.data() + y * strideMain;
@@ -2383,7 +3207,7 @@ void ImageLoader::CreateCpuMergedBitmap()
 
     //    for (UINT x = 0; x < width; x++)
     //    {
-    //        // 读取主图像素（PBGRA8）
+    //        // Read main pixels (PBGRA8).
     //        float R_main = mainRow[4 * x + 2] / 255.0f;
     //        float G_main = mainRow[4 * x + 1] / 255.0f;
     //        float B_main = mainRow[4 * x + 0] / 255.0f;
@@ -2392,7 +3216,7 @@ void ImageLoader::CreateCpuMergedBitmap()
     //        G_main = sRGBToLinear(G_main);
     //        B_main = sRGBToLinear(B_main);
 
-    //        // 读取增益图像素（PBGRA8）
+    //        // Read gain map pixels (PBGRA8).
     //        float gainB = gainRow[4 * x + 0] / 128.0f; // [0.0, 2.0]
     //        float gainG = gainRow[4 * x + 1] / 128.0f;
     //        float gainR = gainRow[4 * x + 2] / 128.0f;
@@ -2401,7 +3225,7 @@ void ImageLoader::CreateCpuMergedBitmap()
     //        //   gainG = sRGBToLinear(gainG);
     //        //   gainR = sRGBToLinear(gainR);
 
-    //           //应用增益公式
+    //           // Apply the gain map formula.
     //        R_main = powf(2.0f, gainR) * (R_main + eps) - eps;
     //        G_main = powf(2.0f, gainG) * (G_main + eps) - eps;
     //        B_main = powf(2.0f, gainB) * (B_main + eps) - eps;
@@ -2410,38 +3234,46 @@ void ImageLoader::CreateCpuMergedBitmap()
     //        BYTE* targetPixel = rowStart + x * bytesPerPixel;
     //        if (targetPixel + bytesPerPixel > dataOut + bufferSizeOut)
     //        {
-    //            continue; // 跳过超出缓冲区的像素
+    //            continue; // Skip pixels beyond the output buffer.
     //        }
 
     //        uint16_t* pixelData = reinterpret_cast<uint16_t*>(targetPixel);
     //        pixelData[0] = FloatToHalf(R_main); // R
     //        pixelData[1] = FloatToHalf(G_main); // G
     //        pixelData[2] = FloatToHalf(B_main); // B
-    //        pixelData[3] = FloatToHalf(1.0f);   // A (不透明)
+    //        pixelData[3] = FloatToHalf(1.0f);   // A (opaque)
 
     //    }
     //}
 
     initLUT();
 
+    const UINT gainWidthMinus1 = gainWidth > 0 ? gainWidth - 1 : 0;
+    const UINT gainHeightMinus1 = gainHeight > 0 ? gainHeight - 1 : 0;
 
 
-    // 设置OpenMP并行
+
+    // Enable OpenMP parallelism.
     #pragma omp parallel for
     for (int y = 0; y < static_cast<int>(height); y++)
     {
         BYTE* mainRow = bufferMain.data() + y * strideMain;
-        BYTE* gainRow = bufferGain.data() + y * strideGain;
         BYTE* rowStart = dataOut + y * strideOut;
+        UINT gainY = static_cast<UINT>((static_cast<uint64_t>(y) * gainHeight) / height);
+        if (gainY > gainHeightMinus1)
+        {
+            gainY = gainHeightMinus1;
+        }
+        BYTE* gainRow = bufferGain.data() + gainY * strideGain;
 
         for (UINT x = 0; x < width; x++)
         {
-            // 读取主图像素（PBGRA8）并转换到线性空间
+            // Read main pixels (PBGRA8) and convert to linear space.
             float R_main = mainRow[4 * x + 2] / 255.0f;
             float G_main = mainRow[4 * x + 1] / 255.0f;
             float B_main = mainRow[4 * x + 0] / 255.0f;
 
-            // 使用sRGBToLinear函数转换
+            // Convert using sRGBToLinear.
             // R_main = sRGBToLinear(R_main);
             // G_main = sRGBToLinear(G_main);
             // B_main = sRGBToLinear(B_main);
@@ -2450,10 +3282,17 @@ void ImageLoader::CreateCpuMergedBitmap()
             G_main = lut_sRGBToLinear(G_main);
             B_main = lut_sRGBToLinear(B_main);
 
-            // 读取增益图像素（PBGRA8）
-            float gainB = gainRow[4 * x + 0] / 255.0f; // [0.0, 1.0]
-            float gainG = gainRow[4 * x + 1] / 255.0f;
-            float gainR = gainRow[4 * x + 2] / 255.0f;
+            // Read gain map pixels (PBGRA8).
+            UINT gainX = static_cast<UINT>((static_cast<uint64_t>(x) * gainWidth) / width);
+            if (gainX > gainWidthMinus1)
+            {
+                gainX = gainWidthMinus1;
+            }
+
+            BYTE* gainPixel = gainRow + 4 * gainX;
+            float gainB = gainPixel[0] / 255.0f; // [0.0, 1.0]
+            float gainG = gainPixel[1] / 255.0f;
+            float gainR = gainPixel[2] / 255.0f;
 
 
             /* gainB = lut_sRGBToLinear(gainB);
@@ -2461,7 +3300,7 @@ void ImageLoader::CreateCpuMergedBitmap()
              gainR = lut_sRGBToLinear(gainR);*/
 
 
-             // 应用增益公式
+             // Apply the gain map formula.
             if (applyGainMap)
             {
                 float gainRValue = gainR;
@@ -2488,15 +3327,15 @@ void ImageLoader::CreateCpuMergedBitmap()
                 B_main = (B_main + offsetSdr[2]) * gainBFactor - offsetHdr[2];
             }
 
-            // 写入目标像素（RGBA half）
+            // Write output pixel (RGBA half).
             BYTE* targetPixel = rowStart + x * bytesPerPixel;
             uint16_t* pixelData = reinterpret_cast<uint16_t*>(targetPixel);
 
-            // 转换为半精度
+            // Convert to half precision.
             pixelData[0] = FloatToHalf(R_main); // R
             pixelData[1] = FloatToHalf(G_main); // G
             pixelData[2] = FloatToHalf(B_main); // B
-            pixelData[3] = 0x3C00;              // A = 1.0 (半精度)
+            pixelData[3] = 0x3C00;              // A = 1.0 (half precision)
         }
     }
     lockOut.Reset();
@@ -2504,13 +3343,10 @@ void ImageLoader::CreateCpuMergedBitmap()
 
     ComPtr<ID2D1ImageSourceFromWic> ID2D1ImageSource_merged;
 
-    //IFRIMG(context->CreateImageSourceFromWic(m_cpuMergedWICBitmapSource.Get(), &ID2D1ImageSource_merged));
+    //    m_cpuMergedWICBitmapSource.Get(),  // IWICBitmapSource
 
     HRESULT hr = context->CreateImageSourceFromWic(m_cpuMergedWICBitmapSource.Get(), &ID2D1ImageSource_merged);
     if (FAILED(hr)) {
-        wchar_t msg[256];
-        swprintf_s(msg, L"CreateImageSourceFromWic failed with HRESULT: 0x%08X\n", hr);
-        OutputDebugString(msg);
     }
 
     IFRIMG(ID2D1ImageSource_merged.As(&m_mergedSource));
@@ -2519,7 +3355,7 @@ void ImageLoader::CreateCpuMergedBitmap()
 
 uint16_t ImageLoader::FloatToHalf(float value)
 {
-    // 简单实现 - 实际项目中应使用优化版本
+    // Simple implementation - use an optimized version in production.
     // uint32_t f = *reinterpret_cast<uint32_t*>(&value);
     // uint32_t sign = (f >> 16) & 0x8000;
     // int32_t exp = (f >> 23) & 0xff;
@@ -2531,15 +3367,15 @@ uint16_t ImageLoader::FloatToHalf(float value)
 
     // exp -= 127;
     // if (exp > 15) {
-    //     return sign | 0x7c00; // 溢出->Inf
+    //     return sign | 0x7c00; // Overflow -> Inf
     // }
     // if (exp < -14) {
-    //     return sign; // 下溢->0
+    //     return sign; // Underflow -> 0
     // }
 
     // uint32_t uexp = static_cast<uint32_t>(exp + 15);
     // uint32_t hmant = mant >> 13;
-    // if ((mant & 0x1000) != 0) { // 四舍五入
+    // if ((mant & 0x1000) != 0) { // Round to nearest
     //     hmant += 1;
     //     if (hmant & 0x0400) {
     //         hmant = 0;
@@ -2583,7 +3419,7 @@ float ImageLoader::lut_sRGBToLinear(float c) {
 }
 
 void ImageLoader::generateEncodeSDRimage() {
-    //原本缩略图在前，原始图在后，解码时会优先查看缩略图，因此在导出ISO HDR时需要颠倒数据位置
+    // Swap thumbnail and main image when exporting ISO HDR.
     changedImage.clear();
     changedImage = jpegData;
     if (m_imageInfo.hasCuvaHdrGainMap || m_imageInfo.hasHuaweiIsoJpegHdrGainMap)

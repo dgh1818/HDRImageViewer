@@ -324,11 +324,11 @@ void HDRImageViewerRenderer::ExportImageToISOJpeg(Windows::Storage::Streams::IRa
 
     concurrency::create_task(writer->StoreAsync())
         .then([writer](unsigned int bytesStored) {
-        // 5. 刷新流
+        // 5. Flush the stream.
         return concurrency::create_task(writer->FlushAsync());
             })
         .then([writer](bool flushResult) {
-        // 6. 清理资源 (在最后一步删除 writer)
+        // 6. Cleanup writer (delete at the end).
         delete writer;
             });
 }
@@ -407,15 +407,15 @@ void HDRImageViewerRenderer::ExportImageToJxr(Windows::Storage::Streams::IRandom
 
         concurrency::create_task(writer->StoreAsync())
             .then([writer](unsigned int bytesStored) {
-            // 5. 刷新流
+            // 5. Flush the stream.
             return concurrency::create_task(writer->FlushAsync());
                 })
             .then([writer](bool flushResult) {
-            // 6. 清理资源 (在最后一步删除 writer)
+            // 6. Cleanup writer (delete at the end).
             delete writer;
                 });
 
-    //    // 4. 刷新流
+    //    // 4. Flush the stream.
     //    auto flushAsync = writer->FlushAsync();
     //    concurrency::create_task(flushAsync).wait();
 }
@@ -466,6 +466,11 @@ void HDRImageViewerRenderer::CreateImageDependentResources()
             D2D1_COLORMANAGEMENT_PROP_DESTINATION_COLOR_CONTEXT,
             destColorContext.Get()));
 
+    IFT(context->CreateEffect(CLSID_D2D1Scale, &m_imageScaleEffect));
+    IFT(m_imageScaleEffect->SetValue(
+        D2D1_SCALE_PROP_INTERPOLATION_MODE,
+        D2D1_SCALE_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC));
+
     // Next, merge the Apple HDR gainmap with the main image to recover HDR highlights.
     // This occurs after color management to scRGB but before any further stages which rely on HDR pixel data.
     // The parameters of the gainmap are empirically determined:
@@ -475,7 +480,7 @@ void HDRImageViewerRenderer::CreateImageDependentResources()
     // * Naively multiplying the gainmap by the main image in linear RGB approximates the visual effect
     //   in the iOS Photos app.
     
-    if (m_imageInfo.hasAppleHdrGainMap == true)
+    if (m_imageInfo.hasAppleHdrGainMap == true || m_imageInfo.hasIsoHeicHdrGainMap == true || m_imageInfo.hasAppleHeicHdrGainMap == true)
     {
         IFT(context->CreateEffect(CLSID_D2D1GammaTransfer, &m_gainmapLinearEffect));
 
@@ -503,12 +508,11 @@ void HDRImageViewerRenderer::CreateImageDependentResources()
         // m_gainMapMergeEffect->SetValue(D2D1_ARITHMETICCOMPOSITE_PROP_COEFFICIENTS, D2D1::Vector4F(2.f, 0.0f, 0.0f, 0.0f));
 
          IFT(context->CreateEffect(CLSID_D2D1Composite, &m_gainMapMergeEffect));
-         m_loadedMergedImage = m_imageLoader->GetMergedImage(m_zoom, false);
 
          ComPtr<ID2D1Effect> identityPassthrough;
          IFT(context->CreateEffect(CLSID_D2D1ColorMatrix, &identityPassthrough));
 
-         // 设置成 Identity Matrix（4x4 + offset）
+         // Use an identity matrix (4x4 + offset).
          D2D1_MATRIX_5X4_F id =
          {
              1, 0, 0, 0,   // R'
@@ -522,10 +526,9 @@ void HDRImageViewerRenderer::CreateImageDependentResources()
              id
          );
 
-         // 把你的合并图当作这个 Effect 的输入
-         identityPassthrough->SetInput(0, m_loadedMergedImage.Get());
+         // Input is set in UpdateImageTransformState().
 
-         // 最后把 identityPassthrough 赋给 m_gainMapMergeEffect
+         // Assign the identity pass-through to the merge effect.
          m_gainMapMergeEffect = identityPassthrough;
     }
     else
@@ -659,7 +662,7 @@ void HDRImageViewerRenderer::CreateHistogramResources()
     IFT(histogramGamma->SetValue(D2D1_GAMMATRANSFER_PROP_BLUE_DISABLE, TRUE));
     IFT(histogramGamma->SetValue(D2D1_GAMMATRANSFER_PROP_ALPHA_DISABLE, TRUE));
 
-    // 5. Finally, the histogram itself.
+    // 5. Flush the stream.
     HRESULT hr = context->CreateEffect(CLSID_D2D1Histogram, &m_histogramEffect);
     
     if (hr == D2DERR_INSUFFICIENT_DEVICE_CAPABILITIES)
@@ -686,6 +689,7 @@ void HDRImageViewerRenderer::ReleaseImageDependentResources()
     m_loadedImage.Reset();
     m_loadedGainMap.Reset();
     m_gainmapLinearEffect.Reset();
+    m_imageScaleEffect.Reset();
     m_gainmapRefWhiteEffect.Reset();
     m_gainMapMergeEffect.Reset();
     m_colorManagementEffect.Reset();
@@ -853,7 +857,7 @@ void HDRImageViewerRenderer::UpdateWhiteLevelScale(float brightnessAdjustment, f
     {
     case AdvancedColorKind::HighDynamicRange:
         // HDR gainmaps are output-referred and do need to be compensated by SdrWhiteLevel.
-        if (m_imageInfo.hasAppleHdrGainMap == true)
+        if (m_imageInfo.hasAppleHdrGainMap == true || m_imageInfo.hasIsoHeicHdrGainMap == true || m_imageInfo.hasAppleHeicHdrGainMap == true)
         {
             scale = sdrWhiteLevel / D2D1_SCENE_REFERRED_SDR_WHITE_LEVEL;
         }
@@ -959,15 +963,60 @@ void HDRImageViewerRenderer::UpdateImageTransformState()
     if (m_imageLoader->GetState() == ImageLoaderState::LoadingSucceeded)
     {
         // Set the new image as the new source to the effect pipeline.
-        m_loadedImage = m_imageLoader->GetLoadedImage(m_zoom, false);
-        m_colorManagementEffect->SetInput(0, m_loadedImage.Get());
+        const bool useGainMap = m_imageInfo.hasAppleHdrGainMap == true ||
+            m_imageInfo.hasIsoHeicHdrGainMap == true ||
+            m_imageInfo.hasAppleHeicHdrGainMap == true;
 
-        if (m_imageInfo.hasAppleHdrGainMap == true)
+        if (m_imageInfo.isHeif)
         {
-            m_loadedGainMap = m_imageLoader->GetLoadedImage(m_zoom, true);
-            //m_gainmapLinearEffect->SetInput(0, m_loadedGainMap.Get());
-            m_loadedMergedImage = m_imageLoader->GetMergedImage(m_zoom, false);
-            m_gainMapMergeEffect->SetInput(0, m_loadedMergedImage.Get());
+            m_loadedImage = m_imageLoader->GetLoadedImageSource(false);
+            if (m_imageScaleEffect)
+            {
+                m_imageScaleEffect->SetInput(0, m_loadedImage.Get());
+                m_imageScaleEffect->SetValue(D2D1_SCALE_PROP_SCALE, D2D1::Vector2F(m_zoom, m_zoom));
+                m_colorManagementEffect->SetInputEffect(0, m_imageScaleEffect.Get());
+            }
+            else
+            {
+                m_colorManagementEffect->SetInput(0, m_loadedImage.Get());
+            }
+
+            if (useGainMap)
+            {
+                m_loadedGainMap = m_imageLoader->GetLoadedImageSource(true);
+                //m_gainmapLinearEffect->SetInput(0, m_loadedGainMap.Get());
+                m_loadedMergedImage = m_imageLoader->GetMergedImageSource();
+
+                if (m_imageScaleEffect)
+                {
+                    m_imageScaleEffect->SetInput(0, m_loadedMergedImage.Get());
+                    m_imageScaleEffect->SetValue(D2D1_SCALE_PROP_SCALE, D2D1::Vector2F(m_zoom, m_zoom));
+                    m_gainMapMergeEffect->SetInputEffect(0, m_imageScaleEffect.Get());
+                }
+                else
+                {
+                    m_gainMapMergeEffect->SetInput(0, m_loadedMergedImage.Get());
+                }
+            }
+        }
+        else
+        {
+            m_loadedImage = m_imageLoader->GetLoadedImage(m_zoom, false);
+            if (m_loadedImage)
+            {
+                m_colorManagementEffect->SetInput(0, m_loadedImage.Get());
+            }
+
+            if (useGainMap)
+            {
+                m_loadedGainMap = m_imageLoader->GetLoadedImage(m_zoom, true);
+                //m_gainmapLinearEffect->SetInput(0, m_loadedGainMap.Get());
+                m_loadedMergedImage = m_imageLoader->GetMergedImage(m_zoom, false);
+                if (m_loadedMergedImage)
+                {
+                    m_gainMapMergeEffect->SetInput(0, m_loadedMergedImage.Get());
+                }
+            }
         }
     }
 }
@@ -1062,7 +1111,7 @@ void HDRImageViewerRenderer::ComputeHdrMetadata()
         // Certain HDR image types use recovered luminance and therefore are display/output-referred.
         // You can't interpret the histogram for these images as physical nits; they are only useful
         // to understand relative intensity.
-        if (m_imageInfo.hasAppleHdrGainMap == true)
+        if (m_imageInfo.hasAppleHdrGainMap == true || m_imageInfo.hasIsoHeicHdrGainMap == true || m_imageInfo.hasAppleHeicHdrGainMap == true)
         {
             m_imageCLL.isSceneReferred = false;
         }
@@ -1191,8 +1240,8 @@ void HDRImageViewerRenderer::startEncodeISOJpeg() {
 void jpegR::encodeISOJpeg(
     int width,
     int height,
-    std::vector<BYTE> sdrImage,   // 替换原来的BYTE* sdrData和int sdrSize
-    std::vector<BYTE> gainmapImage, // 替换原来的BYTE* gainmapData和int gainmapSize
+    std::vector<BYTE> sdrImage,   // Replaces sdrData + sdrSize.
+    std::vector<BYTE> gainmapImage, // Replaces gainmapData + gainmapSize.
     float maxContentBoost,
     float minContentBoost,
     float gamma,
@@ -1201,22 +1250,22 @@ void jpegR::encodeISOJpeg(
     float hdrCapacityMin,
     float hdrCapacityMax)
 {
-    // 1) 把原始字节流封装到 UltraHDR 需要的结构
+    // 1) Pack the SDR and gainmap byte streams for UltraHDR.
     jpegr_compressed_struct jpgSdr = {
         /* data     */ (void*)sdrImage.data(),
-        /* length   */ sdrImage.size(),         // 使用 size() 获取大小
+        /* length   */ sdrImage.size(),         // Use size() for length.
         /* maxLength*/ sdrImage.size(),
         /* colorGamut */ ULTRAHDR_COLORGAMUT_P3
     };
 
     jpegr_compressed_struct jpgGainmap = {
-        (void*)gainmapImage.data(),  // 使用 data() 获取指针
-        gainmapImage.size(),         // 使用 size() 获取大小
-        gainmapImage.size(),
+        (void*)gainmapImage.data(),  // Use data() for pointer.
+        gainmapImage.size(),         // Use size() for length.
+        gainmapImage.size(),         // Use size() for length.
         ULTRAHDR_COLORGAMUT_P3
     };
 
-    // 2) 构造 metadata
+    // 2) generate metadata
     uhdr_gainmap_metadata_ext metadata;
     metadata.version = "1.0";
     for (int i = 0; i < 3; ++i) {
@@ -1228,9 +1277,9 @@ void jpegR::encodeISOJpeg(
     }
     metadata.hdr_capacity_min = hdrCapacityMin;
     metadata.hdr_capacity_max = hdrCapacityMax;
-    metadata.use_base_cg = 1;  // 同基图色域
+    metadata.use_base_cg = 1;  // Use base image color gamut.
 
-    size_t maxOutSize = (size_t)width * height * 3; // 最坏情况
+    size_t maxOutSize = (size_t)width * height * 3; // Worst-case output size.
     uhdr_compressed_image jpgOut;
     std::memset(&jpgOut, 0, sizeof(jpgOut));
     jpgOut.data = malloc(maxOutSize);
@@ -1242,12 +1291,12 @@ void jpegR::encodeISOJpeg(
     appendGainMap(reinterpret_cast<uhdr_compressed_image_t*>(&jpgSdr), reinterpret_cast<uhdr_compressed_image_t*>(&jpgGainmap), /* exif */ nullptr,
         /* icc */ nullptr, /* icc size */ 0, &metadata, reinterpret_cast<uhdr_compressed_image_t*>(&jpgOut));
 
-    // 5) 拷贝输出数据到 std::vector<BYTE>
+    // 5) Copy output data.
     /*std::vector<BYTE> output;*/
     output.resize(jpgOut.data_sz);
     std::memcpy(output.data(), jpgOut.data, jpgOut.data_sz);
 
-    // 6) 释放中间 buffer
+    // 6) Release temp buffer.
     free(jpgOut.data);
 }
 
@@ -1608,17 +1657,17 @@ string jpegR::generateXmpForPrimaryImage(size_t secondary_image_length,
 
 bool jpegR::parse_image(uhdr_compressed_image_t* source_image, ParseResult* result)
 {
-    // 重置全局变量（如果使用）
+    // Reset output fields if needed.
     //result->exif_ptr = nullptr;
     //result->exif_size = 0;
 
-    // 验证输入数据
+    // Validate input data.
     if (!source_image || !source_image->data || source_image->data_sz < 4) {
-        std::cerr << "无效的输入数据" << std::endl;
+        std::cerr << "Invalid input data." << std::endl;
         return false;
     }
 
-    // 正确获取数据指针
+    // Correctly get data pointer.
     BYTE* bytes = static_cast<BYTE*>(source_image->data);
     const size_t data_sz = source_image->data_sz;
 
@@ -1632,15 +1681,14 @@ bool jpegR::parse_image(uhdr_compressed_image_t* source_image, ParseResult* resu
         found_exif_size = parse_result.exif_size;
         exif_pos = parse_result.exif_pos;
     }
-    
-    // 初始化输出图像结构
+
+    // Initialize output image.
     memset(&result->new_jpg_image, 0, sizeof(uhdr_compressed_image_t));
 
-    // 创建不含EXIF的新JPEG图像
-    // 但华为老CUVA格式SDR图本来就不含EXIF
+    // Create a JPEG buffer without EXIF.
     result->new_jpg_image.data = malloc(data_sz);
     if (!result->new_jpg_image.data) {
-        std::cerr << "内存分配失败: " << data_sz << " 字节" << std::endl;
+        std::cerr << "Allocation failed: " << data_sz << " bytes" << std::endl;
         return false;
     }
     memcpy(result->new_jpg_image.data, source_image->data, data_sz);
@@ -1650,7 +1698,8 @@ bool jpegR::parse_image(uhdr_compressed_image_t* source_image, ParseResult* resu
     //if (parse_result.has_exif) {
     //    result->new_jpg_image.data = malloc(data_sz);
     //    if (!result->new_jpg_image.data) {
-    //        std::cerr << "内存分配失败: " << data_sz << " 字节" << std::endl;
+    //        std::cerr << "Allocation failed: " << data_sz << " bytes" << std::endl;
+
     //        return false;
     //    }
     //    memcpy(result->new_jpg_image.data, source_image->data, data_sz);
@@ -1658,10 +1707,10 @@ bool jpegR::parse_image(uhdr_compressed_image_t* source_image, ParseResult* resu
     //    result->new_jpg_image.capacity = data_sz;
     //}
     //else {
-    //    // 没有EXIF，直接复制原数据
+    //    // No EXIF; copy the original data.
     //    result->new_jpg_image.data = malloc(data_sz);
     //    if (!result->new_jpg_image.data) {
-    //        std::cerr << "内存分配失败: " << data_sz << " 字节" << std::endl;
+    //        std::cerr << "Allocation failed: " << data_sz << " bytes" << std::endl;
     //        return false;
     //    }
     //    memcpy(result->new_jpg_image.data, source_image->data, data_sz);
@@ -1669,7 +1718,7 @@ bool jpegR::parse_image(uhdr_compressed_image_t* source_image, ParseResult* resu
     //    result->new_jpg_image.capacity = data_sz;
     //}
 
-    // 复制元数据
+    // Copy metadata fields.
     result->new_jpg_image.cg = source_image->cg;
     result->new_jpg_image.ct = source_image->ct;
     result->new_jpg_image.range = source_image->range;
