@@ -25,19 +25,19 @@
 
 ## About the Project
 支持内容：
-- 支持 ISO HDR gainmap JPEG
+- 支持 ISO HDR gainmap JPEG & HEIC
 - 支持 Apple MPF HDR 照片（iPhone 15 及之前）
 - 支持华为旧 CUVA 标准 HDR 照片（麒麟 9000s 及之前）
 - 支持 gainmap 文件导出为 JXR
-- 支持私有格式转换为 ISO HDR（保存为 JPG 即可）
+- 支持旧格式转换为 ISO HDR（保存为 JPG 即可）
 - 需要在 Windows 安全中心授予"文件系统"权限才能切换照片
 
 Support list:
-- Supports ISO HDR gainmap JPEG
-- Supports Apple MPF HDR photos (iPhone 15 and earlier)
-- Supports legacy Huawei CUVA HDR photos (Kirin 9000s and earlier)
+- Supports ISO HDR gainmap JPEG & HEIC
+- Supports legacy Apple MPF HDR JPEG & HEIC (iPhone 15 and earlier)
+- Supports legacy Huawei CUVA HDR JPEG & HEIC (Kirin 9000s and earlier)
 - Export gainmap files to JXR
-- Convert private formats to ISO HDR (Save As JPG)
+- Convert legacy formats to ISO HDR (Save As JPG)
 - Requires Windows Security Center file system permission to switch photos
   <img width="2885" height="1592" alt="屏幕截图 2025-10-03 165604" src="https://github.com/user-attachments/assets/f930787d-c6b7-442d-8448-66a7d8732437" />
 
@@ -46,12 +46,12 @@ Any device before(include) Kirin9000s use the old CUVA standard HDR photo.(Which
 
 ## Todo
 * 批量实现CUVA到ISO HDR的转换
-* 支持其他设备拍摄的ISO HDR gainmap jpeg
-* 支持heic文件
+* ~~支持其他设备拍摄的ISO HDR gainmap jpeg~~
+* ~~支持heic文件~~
 
-* convert CUVA to ISO in batch
-* support HDR gainmap Jpeg shot by other brand device
-* support HDR gainmap heic file
+* convert CUVA/MPF to ISO in batch
+* ~~support HDR gainmap Jpeg shot by other brand device~~
+* ~~support HDR gainmap heic file~~
 
 Original:
 ## About the Project
