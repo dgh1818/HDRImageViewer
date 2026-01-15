@@ -321,6 +321,339 @@ static bool TryParseBoolAttributeValue(const BYTE* data, size_t len, const char*
     return false;
 }
 
+static bool FindJpegEoi(const std::vector<BYTE>& data, size_t start, size_t limit, size_t& outEoi)
+{
+    if (start + 1 >= data.size() || limit >= data.size() || start >= limit)
+    {
+        return false;
+    }
+
+    if (data[start] != 0xFF || data[start + 1] != 0xD8)
+    {
+        return false;
+    }
+
+    size_t pos = start + 2;
+    bool inScan = false;
+
+    while (pos + 1 <= limit)
+    {
+        if (!inScan)
+        {
+            if (data[pos] != 0xFF)
+            {
+                ++pos;
+                continue;
+            }
+
+            size_t markerPos = pos;
+            while (markerPos <= limit && data[markerPos] == 0xFF)
+            {
+                ++markerPos;
+            }
+
+            if (markerPos > limit)
+            {
+                return false;
+            }
+
+            BYTE marker = data[markerPos];
+            if (marker == 0x00)
+            {
+                pos = markerPos + 1;
+                continue;
+            }
+
+            if (marker == 0xD9)
+            {
+                outEoi = markerPos;
+                return true;
+            }
+
+            if (marker == 0xDA)
+            {
+                if (markerPos + 2 > limit)
+                {
+                    return false;
+                }
+
+                uint16_t segLen = static_cast<uint16_t>(data[markerPos + 1] << 8 | data[markerPos + 2]);
+                if (segLen < 2)
+                {
+                    return false;
+                }
+
+                size_t scanStart = markerPos + 1 + segLen;
+                if (scanStart > limit)
+                {
+                    return false;
+                }
+
+                inScan = true;
+                pos = scanStart;
+                continue;
+            }
+
+            if (marker == 0xD8 || (marker >= 0xD0 && marker <= 0xD7))
+            {
+                pos = markerPos + 1;
+                continue;
+            }
+
+            if (markerPos + 2 > limit)
+            {
+                return false;
+            }
+
+            uint16_t segLen = static_cast<uint16_t>(data[markerPos + 1] << 8 | data[markerPos + 2]);
+            if (segLen < 2)
+            {
+                return false;
+            }
+
+            size_t nextPos = markerPos + 1 + segLen;
+            if (nextPos > limit + 1)
+            {
+                return false;
+            }
+
+            pos = nextPos;
+            continue;
+        }
+
+        if (data[pos] != 0xFF)
+        {
+            ++pos;
+            continue;
+        }
+
+        if (pos + 1 > limit)
+        {
+            return false;
+        }
+
+        BYTE next = data[pos + 1];
+        if (next == 0x00)
+        {
+            pos += 2;
+            continue;
+        }
+
+        if (next >= 0xD0 && next <= 0xD7)
+        {
+            pos += 2;
+            continue;
+        }
+
+        if (next == 0xD9)
+        {
+            outEoi = pos + 1;
+            return true;
+        }
+
+        inScan = false;
+        continue;
+    }
+
+    return false;
+}
+
+static bool TryGetJpegDimensions(const std::vector<BYTE>& data, size_t start, size_t limit,
+    uint16_t& outWidth, uint16_t& outHeight)
+{
+    if (start + 1 >= data.size() || limit >= data.size() || start >= limit)
+    {
+        return false;
+    }
+
+    if (data[start] != 0xFF || data[start + 1] != 0xD8)
+    {
+        return false;
+    }
+
+    size_t pos = start + 2;
+    while (pos + 1 <= limit)
+    {
+        if (data[pos] != 0xFF)
+        {
+            ++pos;
+            continue;
+        }
+
+        size_t markerPos = pos;
+        while (markerPos <= limit && data[markerPos] == 0xFF)
+        {
+            ++markerPos;
+        }
+
+        if (markerPos > limit)
+        {
+            return false;
+        }
+
+        BYTE marker = data[markerPos];
+        if (marker == 0x00)
+        {
+            pos = markerPos + 1;
+            continue;
+        }
+
+        if (marker == 0xD9 || marker == 0xDA)
+        {
+            return false;
+        }
+
+        if (marker == 0xD8 || (marker >= 0xD0 && marker <= 0xD7))
+        {
+            pos = markerPos + 1;
+            continue;
+        }
+
+        if (markerPos + 2 > limit)
+        {
+            return false;
+        }
+
+        uint16_t segLen = static_cast<uint16_t>(data[markerPos + 1] << 8 | data[markerPos + 2]);
+        if (segLen < 2)
+        {
+            return false;
+        }
+
+        size_t segDataStart = markerPos + 3;
+        size_t segEnd = markerPos + 1 + segLen;
+        if (segEnd > limit + 1)
+        {
+            return false;
+        }
+
+        bool isSof = false;
+        switch (marker)
+        {
+        case 0xC0:
+        case 0xC1:
+        case 0xC2:
+        case 0xC3:
+        case 0xC5:
+        case 0xC6:
+        case 0xC7:
+        case 0xC9:
+        case 0xCA:
+        case 0xCB:
+        case 0xCD:
+        case 0xCE:
+        case 0xCF:
+            isSof = true;
+            break;
+        default:
+            break;
+        }
+
+        if (isSof)
+        {
+            if (segLen < 7 || segDataStart + 4 > limit)
+            {
+                return false;
+            }
+
+            outHeight = static_cast<uint16_t>(data[segDataStart + 1] << 8 | data[segDataStart + 2]);
+            outWidth = static_cast<uint16_t>(data[segDataStart + 3] << 8 | data[segDataStart + 4]);
+            return outWidth != 0 && outHeight != 0;
+        }
+
+        pos = segEnd;
+    }
+
+    return false;
+}
+
+// Legacy SDRs can include a thumbnail JPEG followed by the main JPEG. Only reorder
+// when we can locate two complete JPEGs and the second is larger.
+static bool TryReorderLegacySdrData(const std::vector<BYTE>& data, int firstStart, int firstEnd,
+    std::vector<BYTE>& outReordered)
+{
+    if (firstStart < 0 || firstEnd < 0)
+    {
+        return false;
+    }
+
+    size_t start = static_cast<size_t>(firstStart);
+    size_t end = static_cast<size_t>(firstEnd);
+    if (start + 1 >= data.size() || end >= data.size() || start >= end)
+    {
+        return false;
+    }
+
+    size_t firstEoi = 0;
+    if (!FindJpegEoi(data, start, end, firstEoi))
+    {
+        return false;
+    }
+
+    size_t secondSoi = 0;
+    for (size_t i = firstEoi + 1; i + 1 <= end; ++i)
+    {
+        if (data[i] == 0xFF && data[i + 1] == 0xD8)
+        {
+            secondSoi = i;
+            break;
+        }
+    }
+
+    if (secondSoi == 0 || secondSoi + 1 >= end)
+    {
+        return false;
+    }
+
+    size_t secondEoi = 0;
+    if (!FindJpegEoi(data, secondSoi, end, secondEoi))
+    {
+        return false;
+    }
+
+    uint16_t firstWidth = 0;
+    uint16_t firstHeight = 0;
+    uint16_t secondWidth = 0;
+    uint16_t secondHeight = 0;
+    if (!TryGetJpegDimensions(data, start, firstEoi, firstWidth, firstHeight) ||
+        !TryGetJpegDimensions(data, secondSoi, secondEoi, secondWidth, secondHeight))
+    {
+        return false;
+    }
+
+    uint64_t firstArea = static_cast<uint64_t>(firstWidth) * static_cast<uint64_t>(firstHeight);
+    uint64_t secondArea = static_cast<uint64_t>(secondWidth) * static_cast<uint64_t>(secondHeight);
+    if (secondArea <= firstArea)
+    {
+        return false;
+    }
+
+    size_t firstSegmentLen = secondSoi - start;
+    size_t secondSegmentLen = secondEoi - secondSoi + 1;
+    size_t tailLen = end >= secondEoi ? end - secondEoi : 0;
+
+    size_t totalLen = end - start + 1;
+    if (firstSegmentLen + secondSegmentLen + tailLen != totalLen)
+    {
+        return false;
+    }
+
+    outReordered.clear();
+    outReordered.resize(totalLen);
+
+    size_t dest = 0;
+    std::memcpy(outReordered.data() + dest, data.data() + secondSoi, secondSegmentLen);
+    dest += secondSegmentLen;
+    std::memcpy(outReordered.data() + dest, data.data() + start, firstSegmentLen);
+    dest += firstSegmentLen;
+    if (tailLen > 0)
+    {
+        std::memcpy(outReordered.data() + dest, data.data() + secondEoi + 1, tailLen);
+    }
+
+    return true;
+}
+
 void ImageLoader::TryUpdateGainMapMetadataFromBytes(const BYTE* data, size_t len)
 {
     if (!data || len == 0)
@@ -1827,122 +2160,136 @@ int ImageLoader::TryLoadCuvaHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapFr
 
     for (int i = 0; i < len - 10; ++i)
     {
-        if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xE1) {
-
-            // Validate EXIF signature.
-            if (i + 9 < len &&
-                memcmp(&jpegData[i + 4], exif_signature, sizeof(exif_signature)) == 0) {
-
-                // Set EXIF position.
-                exif_pos = i + 4;
-                exif_result.exif_pos = i + 4;
-
-                exif_result.exif_ptr = &jpegData[exif_pos];
-                exif_result.has_exif = true;
-
-                break;
-            }
-        }
-    }
-    
-    for (int i = 0; i < len - 3; ++i)
-    {
-        if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD8 &&
-            jpegData[i + 2] == 0xFF && jpegData[i + 3] == 0xE0)
+        if (jpegData[i] != 0xFF || jpegData[i + 1] != 0xE1)
         {
-            if (exif_result.has_exif)
-            {
-                exif_result.exif_size = i - exif_result.exif_pos;
-            }
-            
-            firstStart = i;
-            thumbnailStart = i + 2;
+            continue;
+        }
+
+        uint16_t segLen = static_cast<uint16_t>(jpegData[i + 2] << 8 | jpegData[i + 3]);
+        if (segLen < 2)
+        {
+            continue;
+        }
+
+        size_t segStart = i + 4;
+        size_t segDataLen = segLen - 2;
+        if (segStart + segDataLen > static_cast<size_t>(len))
+        {
+            continue;
+        }
+
+        if (segDataLen >= sizeof(exif_signature) &&
+            memcmp(&jpegData[segStart], exif_signature, sizeof(exif_signature)) == 0)
+        {
+            exif_pos = segStart;
+            exif_result.exif_pos = segStart;
+            exif_result.exif_ptr = &jpegData[segStart];
+            exif_result.exif_size = segDataLen;
+            exif_result.has_exif = true;
             break;
         }
     }
 
-    if (firstStart < 0)
+    bool isHuawei = false;
+    if (cuvaMftr.vt == VT_LPSTR && cuvaMftr.pszVal != nullptr)
     {
-        for (int i = 0; i < len - 1; ++i)
+        isHuawei = _stricmp(cuvaMftr.pszVal, "HUAWEI") == 0;
+    }
+    else if (cuvaMftr.vt == VT_LPWSTR && cuvaMftr.pwszVal != nullptr)
+    {
+        isHuawei = _wcsicmp(cuvaMftr.pwszVal, L"HUAWEI") == 0;
+    }
+
+    size_t firstSoi = 0;
+    bool foundFirstSoi = false;
+    for (size_t i = 0; i + 1 < jpegData.size(); ++i)
+    {
+        if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD8)
         {
-            if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD8)
-            {
-                firstStart = i;
-                thumbnailStart = i + 2;
-                break;
-            }
+            firstSoi = i;
+            foundFirstSoi = true;
+            break;
         }
     }
 
-    if (firstStart < 0)
+    if (!foundFirstSoi)
     {
         return 0;
     }
 
-    for (int i = firstStart+ 5; i < len - 1; ++i)
+    size_t firstEoi = 0;
+    if (!FindJpegEoi(jpegData, firstSoi, jpegData.size() - 1, firstEoi))
     {
-        if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xE0)
-        {
-            thumbnailEnd = i - 1;
-            mainImageStart = i;
-            
-            break;
-        }
-    }
-
-
-    for (int i = firstStart; i < len - 3; ++i)
-    {
-        if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD8 &&
-            jpegData[i + 2] == 0xFF && jpegData[i + 3] == 0xE2)
-        {
-            mainImageEnd = i - 3;
-            firstEnd = i - 1;
-            secondStart = i;
-            gainmapType = 2;
-            break;
-        }
-    }
-
-    if (secondStart == -1) {
-        bool isHuawei = false;
-        if (cuvaMftr.vt == VT_LPSTR && cuvaMftr.pszVal != nullptr)
-        {
-            isHuawei = _stricmp(cuvaMftr.pszVal, "HUAWEI") == 0;
-        }
-        else if (cuvaMftr.vt == VT_LPWSTR && cuvaMftr.pwszVal != nullptr)
-        {
-            isHuawei = _wcsicmp(cuvaMftr.pwszVal, L"HUAWEI") == 0;
-        }
-
-        if (!isHuawei) return 0;
-
-        for (int i = firstStart; i < len - 3; ++i)
-        {
-            if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD8 &&
-                jpegData[i + 2] == 0xFF && jpegData[i + 3] == 0xE5)
-            {
-                mainImageEnd = i - 3;
-                firstEnd = i - 1;
-                secondStart = i;
-                gainmapType = 1;
-                break;
-            }
-        }
-    }
-
-    for (int i = secondStart; i < len - 1; ++i)
-    {
-        if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD9)
-        {
-            secondEnd = i + 1;
-            break;
-        }
-    }
-
-    if (secondStart == -1 || secondEnd == -1) {
         return 0;
     }
+
+    size_t secondSoi = 0;
+    bool foundSecondSoi = false;
+    for (size_t i = firstEoi + 1; i + 1 < jpegData.size(); ++i)
+    {
+        if (jpegData[i] == 0xFF && jpegData[i + 1] == 0xD8)
+        {
+            secondSoi = i;
+            foundSecondSoi = true;
+            break;
+        }
+    }
+
+    if (!foundSecondSoi)
+    {
+        return 0;
+    }
+
+    size_t secondEoi = 0;
+    if (!FindJpegEoi(jpegData, secondSoi, jpegData.size() - 1, secondEoi))
+    {
+        return 0;
+    }
+
+    BYTE secondMarker = 0;
+    bool foundMarker = false;
+    for (size_t pos = secondSoi + 2; pos < jpegData.size(); ++pos)
+    {
+        if (jpegData[pos] != 0xFF)
+        {
+            continue;
+        }
+
+        while (pos < jpegData.size() && jpegData[pos] == 0xFF)
+        {
+            ++pos;
+        }
+
+        if (pos < jpegData.size())
+        {
+            secondMarker = jpegData[pos];
+            foundMarker = true;
+        }
+        break;
+    }
+
+    if (!foundMarker)
+    {
+        return 0;
+    }
+
+    if (secondMarker == 0xE2)
+    {
+        gainmapType = 2;
+    }
+    else if (secondMarker == 0xE5 && isHuawei)
+    {
+        gainmapType = 1;
+    }
+    else
+    {
+        return 0;
+    }
+
+    firstStart = static_cast<int>(firstSoi);
+    firstEnd = static_cast<int>(firstEoi);
+    secondStart = static_cast<int>(secondSoi);
+    secondEnd = static_cast<int>(secondEoi);
 
     sdrSize = firstEnd - firstStart + 1;
     gainSize = secondEnd - secondStart + 1;
@@ -3424,8 +3771,17 @@ void ImageLoader::generateEncodeSDRimage() {
     changedImage = jpegData;
     if (m_imageInfo.hasCuvaHdrGainMap || m_imageInfo.hasHuaweiIsoJpegHdrGainMap)
     {
-        std::memcpy(changedImage.data() + thumbnailStart, jpegData.data() + mainImageStart, mainImageEnd - mainImageStart + 1);
-        std::memcpy(changedImage.data() + thumbnailStart + mainImageEnd - mainImageStart + 1, jpegData.data() + thumbnailStart, thumbnailEnd - thumbnailStart + 1);
+        std::vector<BYTE> reorderedSdr;
+        if (TryReorderLegacySdrData(jpegData, firstStart, firstEnd, reorderedSdr))
+        {
+            const size_t blockSize = reorderedSdr.size();
+            if (blockSize > 0 &&
+                firstStart >= 0 &&
+                static_cast<size_t>(firstStart) + blockSize <= changedImage.size())
+            {
+                std::memcpy(changedImage.data() + firstStart, reorderedSdr.data(), blockSize);
+            }
+        }
     }
 
     if (exif_result.has_exif)
